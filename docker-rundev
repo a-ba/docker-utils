@@ -1,0 +1,139 @@
+#!/usr/bin/python3
+
+import argparse
+from contextlib import contextmanager
+from subprocess import call, check_call, SubprocessError
+import re
+import os
+import sys
+
+ENTRYPOINT   = "/.docker-run-cmd.entrypoint"
+RO_SOURCEDIR = "/.docker-run-cmd.source"
+OVERLAY      = "/tmp/.overlay"
+
+def die(fmt, *k):
+    sys.stderr.write("error: %s\n" % (fmt % k))
+    sys.exit(1)
+
+
+class overlay:
+    target = "/source"
+
+    @classmethod
+    def mount(cls):
+        lower  = RO_SOURCEDIR 
+        upper  = OVERLAY + "/upper"
+        work   = OVERLAY + "/work"
+        os.makedirs(cls.target)
+
+        st = os.stat(lower)
+        for p in upper, work:
+            os.makedirs(p)
+            os.chmod(p, st.st_mode)
+            os.chown(p, st.st_uid, st.st_gid)
+
+        check_call(["mount", "-t", "overlay", "none",
+                ("-olowerdir=%s,upperdir=%s,workdir=%s" % (lower, upper, work)), 
+                cls.target])
+    @classmethod
+    def umount(cls):
+        call(["umount", cls.target])
+def run_docker(args):
+    cmd = ["docker", "run", "--rm", "--cap-add", "sys_admin",
+        "--entrypoint", ENTRYPOINT,
+        "-e", "DOCKER_RUN_DEV_ID=%s:%s:%s" % (
+            os.getuid(), os.getgid(), ",".join(map(str, os.getgroups()))),
+        "-v", "%s:%s:ro" % (os.path.realpath(__file__),    ENTRYPOINT),
+        "-v", "%s:%s:ro" % (os.path.realpath(args.source), RO_SOURCEDIR),
+        "-v", "/tmp"]
+
+    if sys.stdout.isatty():
+        cmd.extend(("-t", "-i"))
+
+    if not os.path.isdir(args.source):
+        die("source must be a directory: %r", args.source)
+
+    for name in "target", "cache":
+        path = getattr(args, name)
+        if path:
+            os.path.isdir(path) or os.makedirs(path)
+            cmd.extend(("-v", "%s:/%s:rw" % (os.path.realpath(path), name)))
+
+    cmd.extend(args.args)
+    print(cmd)
+
+    return call(cmd)
+
+def entrypoint(argv):
+    if not argv:
+        argv = ["/bin/bash"]
+
+    mo = re.match(r"(\d+):(\d+):([\d+,]*)\Z", os.environ.get("DOCKER_RUN_DEV_ID", ""))
+    assert mo, "invalid DOCKER_RUN_DEV_ID"
+    uid = int(mo.group(1))
+    gid = int(mo.group(2))
+    groups = [int(x) for x in mo.group(3).split(",") if x]
+
+    pid = None
+    overlay.mount()
+    try:
+        pid = os.fork()
+        if pid:
+            # parent
+            code = os.waitpid(pid, 0)[1]
+            if os.WIFEXITED(code):
+                return os.WEXITSTATUS(code)
+            else:
+                sys.stderr.write("killed by signal %d\n" % os.WTERMSIG(code))
+                return 1
+        else:
+            # child
+            for name in "target", "cache":
+                path = "/" + name
+                if not os.path.exists(path):
+                    tmp = "/tmp/.docker-run-dev." + name
+                    os.mkdir(tmp)
+                    os.chown(tmp, uid, gid)
+                    os.symlink(tmp, path)
+
+            os.setgroups(groups)
+            os.setgid(gid)
+            os.setuid(uid)
+            os.environ["HOME"] = "/"
+
+            os.chdir("/source")
+
+            os.execvp(argv[0], argv)
+    finally:
+        if pid != 0:
+            overlay.umount()
+
+
+def main():
+    parser = argparse.ArgumentParser("docker-rundev")
+    parser.add_argument("args", metavar="...", nargs=argparse.REMAINDER,
+            help="arguments to be provided to 'docker run'")
+    parser.add_argument("-s", "--source", default=".",
+            help="host path of the source dir (mounted as /source with an overlay)")
+    parser.add_argument("-t", "--target",
+            help="host path of the target dir (mounted as /target)")
+    parser.add_argument("-c", "--cache",
+            help="host path of the cache dir (mounted as /cache)")
+    
+    args = parser.parse_args()
+
+    try:
+        if os.getpid() != 1:
+            return run_docker(args)
+        else:
+            assert args.source=="."
+            assert not args.cache and not args.target
+            return entrypoint(args.args)
+
+    except SubprocessError as e:
+        die("%s", e)
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+

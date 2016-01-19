@@ -1,0 +1,95 @@
+#!/usr/bin/python3
+# vim:et:nosta:sw=4:sts=4:
+
+import argparse, difflib, subprocess, json, contextlib, signal, tempfile, os, sys
+
+from subprocess import Popen, PIPE
+
+def run(cmd):
+#    sys.stderr.write("run %s\n" % " ".join(map(repr, cmd)))
+    proc = Popen(cmd, stdin=PIPE, stdout=PIPE,
+            preexec_fn = lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
+    out, _ = proc.communicate()
+    code = proc.wait()
+
+    assert not code
+    return out.decode().strip()
+
+def inspect(ctr):
+    lst = json.loads(run(["docker", "inspect", ctr]))
+    assert len(lst) == 1
+    return lst[0]
+
+class Deferrer:
+    def __init__(self):
+        self._depth  = 0
+        self._caught = None
+
+    def _handler(self, sig, frame):
+        assert isinstance(self._caught, bool)
+        self._caught = True
+        
+    def __enter__(self):
+        assert self._depth >= 0
+        if not self._depth:
+            assert self._caught is None
+            self._caught = False
+            signal.signal(signal.SIGINT, self._handler)
+        else:
+            assert isinstance(self._caught, bool)
+        self._depth += 1
+        return self
+
+    def __exit__(self, a, b, c):
+        assert self._depth > 0
+        assert isinstance(self._caught, bool)
+        self._depth -= 1
+        if not self._depth:
+            caught = self._caught
+            self._caught = None
+            if caught:
+                raise KeyboardInterrupt()
+defer_sigint = Deferrer()
+
+
+@contextlib.contextmanager
+def run_tmp_container(image):
+    ctr = None
+    try:
+        with defer_sigint:
+            #TODO: use docker create
+            ctr = run(["docker", "run", "-d", image, "/bin/true"])
+        yield ctr
+    finally:
+        if ctr:
+            with defer_sigint:
+                run(["docker", "rm", "-f", ctr])
+
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument("container", metavar="CONTAINER", action="store",
+        help = "container to be diffed")
+
+parser.add_argument("files", metavar="FILE", action="store",
+        nargs="+", help = "files to be diffed")
+
+args = parser.parse_args()
+
+image = inspect(args.container)["Image"]
+
+with run_tmp_container(image) as tmpctr, \
+        tempfile.TemporaryDirectory() as tmpdir:
+        orig = os.path.join(tmpdir, "orig")
+        dest = os.path.join(tmpdir, "dest")
+        for path in args.files:
+            bn = os.path.basename(path)
+            path = path.strip("/")
+            assert bn, "must not be a directory"
+            with defer_sigint:
+                # TODO: allow file creation
+                run(["docker", "cp", "%s:/%s" % (tmpctr, path), orig])
+                run(["docker", "cp", "%s:/%s" % (args.container, path), dest])
+            with    open(orig) as a, \
+                    open(dest) as b:
+                print("".join(difflib.unified_diff(list(a), list(b), path, path)))

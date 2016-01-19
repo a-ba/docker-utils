@@ -1,0 +1,76 @@
+#!/bin/sh
+
+die()
+{
+	cat >&2 <<EOF
+$0:error: $@
+EOF
+	exit 1
+}
+
+
+[ -n "$DISPLAY" ] || die '$DISPLAY is not set'
+
+echo "x$DISPLAY" | grep -q "^x:" || die '$DISPLAY is not local'
+
+if [ "$1" = "--trusted" ] ; then
+	access=trusted
+	ipc="--ipc=host"
+	shift
+else
+	access=untrusted
+	ipc=
+fi
+echo "Access: $access"
+
+cleanup()
+{
+	set +e
+
+	[ -n "$temp" ]		&&  rm -rf "$temp"
+}
+
+
+temp=
+
+# abort on any error and call cleanup() on exit
+trap cleanup EXIT
+set -e
+
+# temporary directory
+temp="`mktemp -d`"
+chmod 0700 "$temp"
+
+# dummy hostname
+# TODO: create the container, then inspect the hostname
+hostname="`hostname -s`-docker-runx"
+
+# generate an untrusted X11 cookie for the current display
+host_x11_tmp_cookie="$temp/x11_tmp_cookie"
+touch    "$host_x11_tmp_cookie"
+xauth -f "$host_x11_tmp_cookie" generate "$DISPLAY" MIT-MAGIC-COOKIE-1 "$access"
+
+# export it for the container (to match the container's hostname)
+host_x11_cookie="$temp/x11_cookie"
+touch    "$host_x11_cookie"
+xauth -f "$host_x11_tmp_cookie" list "$DISPLAY" | sed 's/^[^ ]*//' | xargs xauth -f "$host_x11_cookie" add "$hostname/unix$DISPLAY"
+rm       "$host_x11_tmp_cookie"
+
+chmod 0644 "$host_x11_cookie"
+
+# guess pulse server
+pulse_server="`pactl info|grep '^Server String'|sed 's/^Server String: *//'`"
+echo "x$pulse_server" | grep -q "^xunix:/" || die "pulseaudio server is not local"
+pulse_socket="`echo "x$pulse_server" | sed s/xunix://`"
+
+
+docker run						\
+	--hostname "$hostname"				\
+	$ipc						\
+	-v "/tmp/.X11-unix:/tmp/.X11-unix:ro"		\
+	-v "$temp:/.docker-runx:ro"			\
+	-e "DISPLAY=$DISPLAY"				\
+	-e "XAUTHORITY=/.docker-runx/x11_cookie"	\
+	-v "$pulse_socket:/.pulse/pulse_socket"		\
+	-e  "PULSE_SERVER=/.pulse/pulse_socket"		\
+	"$@"
