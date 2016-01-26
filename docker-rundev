@@ -39,6 +39,7 @@ class overlay:
     def umount(cls):
         call(["umount", cls.target])
 def run_docker(args):
+    # TODO: should remove CAP_SYS_ADMIN
     cmd = ["docker", "run", "--rm", "--cap-add", "sys_admin",
         "--entrypoint", ENTRYPOINT,
         "-e", "DOCKER_RUN_DEV_ID=%s:%s:%s" % (
