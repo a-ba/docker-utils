@@ -13,9 +13,11 @@
 # as not to transfer images that are already present in the destination daemon.
 #
 
-import argparse, os, re, subprocess, sys, tempfile, time
+import argparse, logging, os, re, shutil, subprocess, sys, tempfile, time
 
 PROG = "docker-ssh"
+
+log = logging.getLogger(PROG)
 
 class SshSession:
     def __init__(self, user, host, port):
@@ -43,13 +45,16 @@ class SshSession:
         if self.port:
             self.basecmd.extend(["-p", self.port])
 
-        self.proc = subprocess.Popen(self.cmd(opt=["-MN"]))
+        cmd = self.cmd(opt=["-MN"])
+        log_exec(cmd)
+        self.proc = subprocess.Popen(cmd)
+        return self
+
+    def wait_ready(self):
         while not os.path.exists(self.tmpsock):
             time.sleep(0.1)
             if self.proc.poll() is not None:
                 die("ssh connection error")
-
-        return self
 
     def __exit__(self, a, b, c):
         try:
@@ -59,16 +64,22 @@ class SshSession:
             self.tmpdir.cleanup()
             self.tmpdir.__exit__(a, b, c)
 
-def run(cmd, *, input="", **kw):
-    print (cmd)
+def log_exec(cmd):
+    log.debug("exec: %s", ((" ".join(map(repr, cmd))) if isinstance(cmd, list) else cmd))
+
+def run(cmd, *, input="", fail_silently=False, **kw):
+    log_exec(cmd)
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, **kw)
     out, err = proc.communicate(input)
 
     if proc.returncode:
+        if fail_silently:
+            return None
         die("subprocess returned error code %d" % proc.returncode)
     return out
 
 def run_err(cmd, *, input="", **kw):
+    log_exec(cmd)
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kw)
     out, err = proc.communicate(input)
     return out, proc.returncode
@@ -77,38 +88,91 @@ def die(msg):
     sys.stderr.write("%s: %s\n" % (PROG, msg))
     sys.exit(1)
 
-def list_images(docker_cmd):
-    return run(docker_cmd + ["images", "-q", "--no-trunc", "-a"]).decode().splitlines()
+def check_support_save_exclude(cmd_filter = lambda x:x):
+    err, code = run_err(cmd_filter(["docker", "save", "--help"]))
+    mo = re.search(b"--exclude(.*Images not to be included)?", err)
+    if mo:
+        return "old" if mo.group(1) else "yes"
 
-def push(session, images):
-    err, code = run_err(["docker", "save", "--help"])
-    excludes = list_images(session.cmd(["docker"])) if b"--exclude" in err else ()
+def check_support_load_print_excludes(cmd_filter = lambda x:x):
+    err, code = run_err(cmd_filter(["docker", "load", "--help"]))
+    return b"--print-excludes" in err
 
-    
-    cmd = "docker save {exclude} {images} | {ssh} docker load".format(
-            ssh     = " ".join(map(repr, session.cmd())),
-            exclude = " ".join("-e %s" % x for x in excludes),
-            images  = " ".join(map(repr, images))
-            )
-    run(cmd, shell=True)
 
-    
+def do_transfer(session, images, src, dst, can_exclude, can_print_excludes):
+    ssh = " ".join(map(repr, session.cmd()))
+    params = dict(
+        images  = " ".join(map(repr, images)),
+        src_ssh = ("" if src == "local" else ssh),
+        dst_ssh = ("" if dst == "local" else ssh),
+        pipe    = ("| pv |" if shutil.which("pv") else "|"),
+    )
+    del ssh
+    assert params["src_ssh"] != params["dst_ssh"]
+
+    excludes = []
+    def fallback(msg, *k):
+        log.warning(msg + " ==> fallback to full image export", *k)
+        excludes.clear()
+
+    if can_exclude == "yes":
+        log.info("%s: 'docker save --exclude==all' supported", src)
+
+        if can_print_excludes:
+            log.info("%s: 'docker load --print-excludes' supported", dst)
+            excludes = run("{src_ssh} docker save --exclude=all {images} | {dst_ssh} docker load --print-excludes"
+                        .format(**params), shell=True).decode().splitlines()
+        else:
+            fallback("%s: 'docker load --print-excludes' not supported", dst)
+
+    elif can_exclude == "old":
+        log.info("%s: 'docker save --excludes' supported (old docker < 1.10.0)", src)
+
+        if can_print_excludes:
+            excludes.append(":")
+        else:
+            excludes = run("{dst_ssh} docker images -aq --no-trunc"
+                            .format(**params), shell=True).decode().splitlines()
+
+        if excludes and ":" in excludes[0]:
+            fallback("%s: unable to list legacy layers (docker >= 1.10.0)", dst)
+    else:
+        fallback("%s: 'docker save --excludes' not supported", src)
+
+    run("{src_ssh} docker save {exclude} {images} {pipe} {dst_ssh} docker load".format(
+                exclude = (" ".join("--exclude %s" % x for x in excludes)),
+                **params), shell=True)
+
 
 def pull(session, images):
-    err, code = run_err(session.cmd(["docker", "save", "--help"]))
-    excludes = list_images(["docker"]) if b"--exclude" in err else ()
 
-    cmd = "{ssh} docker save {exclude} {images} | docker load".format(
-            ssh     = " ".join(map(repr, session.cmd())),
-            exclude = " ".join("-e %s" % x for x in excludes),
-            images  = " ".join(map(repr, images))
-            )
-    run(cmd, shell=True)
+    can_print_excludes = check_support_load_print_excludes()
+    session.wait_ready()
+    can_exclude = check_support_save_exclude(session.cmd)
+
+    do_transfer(session, images, "remote", "local", can_exclude, can_print_excludes)
+
+
+def push(session, images):
+
+    can_exclude = check_support_save_exclude()
+    session.wait_ready()
+    can_print_excludes = check_support_load_print_excludes(session.cmd)
+
+    do_transfer(session, images, "local", "remote", can_exclude, can_print_excludes)
+
 
 def main():
+    def loglevel(value):
+        v = value.upper()
+        if v not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            raise ValueError()
+        return getattr(logging, v)
 
     parser = argparse.ArgumentParser(prog=PROG,
         	    description="pull and push docker images over ssh")
+    parser.add_argument("--log-level", default="WARNING", type=loglevel,
+            help="log level (default WARNING)")
 
     sub = parser.add_subparsers(dest="command", help="sub-command help")
 
@@ -125,8 +189,9 @@ def main():
     p.add_argument("images", metavar="IMAGE", nargs="+",
             help="docker images to be pulled")
 
-
     args = parser.parse_args()
+
+    logging.basicConfig (level=args.log_level, format="%(levelname)-7s:%(name)s:%(message)s")
 
     if not args.command:
         parser.print_help()
