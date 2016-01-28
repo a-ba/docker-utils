@@ -1,0 +1,6 @@
+#!/bin/sh
+
+imgs="`docker images --no-trunc -q -f dangling=true`"
+
+[ -z "$imgs" ] || docker rmi -- $imgs
+

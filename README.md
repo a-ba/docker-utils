@@ -122,3 +122,24 @@ mininit runs the COMMAND as PID 2 and stay in the background, there it:
  - forwards received signals (SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2) to PID 2
  - propagates the exit code of PID 2
 
+
+docker-remove-zombies
+---------------------
+
+**Remove all stopped containers**
+
+This is an alias for:
+<pre>
+    docker ps -aq --no-trunc -f status=exited -f status=created | xargs docker rm 
+</pre>
+
+
+docker-remove-untagged-images
+-----------------------------
+
+**Remove all images that are not tagged**
+
+This is an alias for:
+<pre>
+    docker images --no-trunc -q -f dangling=true | xargs docker rmi
+</pre>
