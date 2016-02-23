@@ -60,7 +60,7 @@ def run_docker(args):
             os.path.isdir(path) or os.makedirs(path)
             cmd.extend(("-v", "%s:/%s:rw" % (os.path.realpath(path), name)))
 
-    cmd.extend(args.args)
+    cmd.extend(args.extra)
     print(cmd)
 
     return call(cmd)
@@ -111,8 +111,9 @@ def entrypoint(argv):
 
 
 def main():
-    parser = argparse.ArgumentParser("docker-rundev")
-    parser.add_argument("args", metavar="...", nargs=argparse.REMAINDER,
+    parser = argparse.ArgumentParser("docker-rundev",
+            usage="docker-rundev [ OPTIONS ] [ -- DOCKER_OPTIONS ] ...")
+    parser.add_argument("extra", metavar="...", nargs=argparse.REMAINDER,
             help="arguments to be provided to 'docker run'")
     parser.add_argument("-s", "--source", default=".",
             help="host path of the source dir (mounted as /source with an overlay)")
@@ -122,6 +123,8 @@ def main():
             help="host path of the cache dir (mounted as /cache)")
     
     args = parser.parse_args()
+    if args.extra and args.extra[0] == "--":
+        args.extra.pop(0)
 
     try:
         if os.getpid() != 1:
@@ -129,7 +132,7 @@ def main():
         else:
             assert args.source=="."
             assert not args.cache and not args.target
-            return entrypoint(args.args)
+            return entrypoint(args.extra)
 
     except SubprocessError as e:
         die("%s", e)
