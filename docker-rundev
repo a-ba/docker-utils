@@ -61,7 +61,7 @@ def run_docker(args):
             cmd.extend(("-v", "%s:/%s:rw" % (os.path.realpath(path), name)))
 
     cmd.extend(args.extra)
-    print(cmd)
+    print(" ".join(map(repr, cmd)))
 
     return call(cmd)
 
