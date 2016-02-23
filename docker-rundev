@@ -43,7 +43,8 @@ def run_docker(args):
     cmd = ["docker", "run", "--rm", "--cap-add", "sys_admin",
         "--entrypoint", ENTRYPOINT,
         "-e", "DOCKER_RUN_DEV_ID=%s:%s:%s" % (
-            os.getuid(), os.getgid(), ",".join(map(str, os.getgroups()))),
+            (0,0,"") if args.root else (
+                os.getuid(), os.getgid(), ",".join(map(str, os.getgroups())))),
         "-v", "%s:%s:ro" % (os.path.realpath(__file__),    ENTRYPOINT),
         "-v", "%s:%s:ro" % (os.path.realpath(args.source), RO_SOURCEDIR),
         "-v", "/tmp"]
@@ -121,6 +122,9 @@ def main():
             help="host path of the target dir (mounted as /target)")
     parser.add_argument("-c", "--cache",
             help="host path of the cache dir (mounted as /cache)")
+
+    parser.add_argument("-r", "--root", action="store_true",
+            help="run container as root")
     
     args = parser.parse_args()
     if args.extra and args.extra[0] == "--":
