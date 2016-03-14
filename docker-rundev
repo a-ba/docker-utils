@@ -49,6 +49,14 @@ def run_docker(args):
         "-v", "%s:%s:ro" % (os.path.realpath(args.source), RO_SOURCEDIR),
         "-v", "/tmp"]
 
+    from docker_utils_aba   import docker_version, pkg_file
+    if docker_version() >= (1, 10, 0):
+        # enable the 'mount' syscall
+        # TODO: restrict mount() args
+        seccomp_profile = pkg_file("docker-rundev-seccomp.json")
+        assert os.path.isfile(seccomp_profile)
+        cmd.extend(("--security-opt", "seccomp:" + seccomp_profile))
+
     if sys.stdout.isatty():
         cmd.extend(("-t", "-i"))
 
