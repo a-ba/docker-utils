@@ -65,7 +65,7 @@ This command is a wrapper for running a container with a command that:
 
 <pre>
 usage:
-    docker-run-dev [-h] [-s SOURCE] [-t TARGET] [-c CACHE] [ 'docker run' options ] IMAGE [ COMMAND ... ]
+    docker-rundev [-h] [-s SOURCE] [-t TARGET] [-c CACHE] [ -- DOCKER_OPTIONS ] IMAGE [ COMMAND ... ]
 
 optional arguments:
   -h, --help            	show this help message and exit
