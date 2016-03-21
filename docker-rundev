@@ -6,62 +6,42 @@ from subprocess import call, check_call, SubprocessError
 import re
 import os
 import sys
-
-ENTRYPOINT   = "/.docker-run-cmd.entrypoint"
-RO_SOURCEDIR = "/.docker-run-cmd.source"
-OVERLAY      = "/tmp/.overlay"
+import tempfile
 
 def die(fmt, *k):
     sys.stderr.write("error: %s\n" % (fmt % k))
     sys.exit(1)
 
+def shellquote(cmd):
+    if isinstance(cmd, str):
+        return cmd if re.match(r"[a-zA-Z0-9_,.+=:/-]+\Z", cmd) else repr(cmd)
+    else:
+        assert all(isinstance(x, str) for x in cmd)
+        return " ".join(map(shellquote, cmd))
 
-class overlay:
-    target = "/source"
 
-    @classmethod
-    def mount(cls):
-        lower  = RO_SOURCEDIR 
-        upper  = OVERLAY + "/upper"
-        work   = OVERLAY + "/work"
-        os.makedirs(cls.target)
+@contextmanager
+def overlay(source):
+    assert ":" not in source
+    assert "=" not in source
 
-        st = os.stat(lower)
-        for p in upper, work:
-            os.makedirs(p)
-            os.chmod(p, st.st_mode)
-            os.chown(p, st.st_uid, st.st_gid)
+    with tempfile.TemporaryDirectory() as tmp:
+        diff = os.path.join(tmp, "diff")
+        mnt  = os.path.join(tmp, "mnt")
+        os.mkdir(diff)
+        os.mkdir(mnt)
+        try:
+            check_call(["unionfs-fuse", "-o", "cow,allow_root", "%s=RW:%s=RO" % (diff, source), mnt])
+            yield mnt
+        finally:
+            check_call(["fusermount", "-u", mnt])
 
-        check_call(["mount", "-t", "overlay", "none",
-                ("-olowerdir=%s,upperdir=%s,workdir=%s" % (lower, upper, work)), 
-                cls.target])
-    @classmethod
-    def umount(cls):
-        call(["umount", cls.target])
-def run_docker(args):
-    # TODO: should remove CAP_SYS_ADMIN
-    cmd = ["docker", "run", "--rm", "--cap-add", "sys_admin",
-        "--entrypoint", ENTRYPOINT,
-        "-e", "DOCKER_RUN_DEV_ID=%s:%s:%s" % (
-            (0,0,"") if args.root else (
-                os.getuid(), os.getgid(), ",".join(map(str, os.getgroups())))),
-        "-v", "%s:%s:ro" % (os.path.realpath(__file__),    ENTRYPOINT),
-        "-v", "%s:%s:ro" % (os.path.realpath(args.source), RO_SOURCEDIR),
-        "-v", "/tmp"]
 
-    from docker_utils_aba   import docker_version, pkg_file
-    if docker_version() >= (1, 10, 0):
-        # enable the 'mount' syscall
-        # TODO: restrict mount() args
-        seccomp_profile = pkg_file("docker-rundev-seccomp.json")
-        assert os.path.isfile(seccomp_profile)
-        cmd.extend(("--security-opt", "seccomp:" + seccomp_profile))
-
-    if sys.stdout.isatty():
-        cmd.extend(("-t", "-i"))
-
-    if not os.path.isdir(args.source):
-        die("source must be a directory: %r", args.source)
+def run_docker(args, source):
+    cmd = ["docker", "run", "--rm",
+        "-w", "/source",
+        "-v", "/tmp",
+        "-v", "%s:/source" % source]
 
     for name in "target", "cache":
         path = getattr(args, name)
@@ -69,54 +49,22 @@ def run_docker(args):
             os.path.isdir(path) or os.makedirs(path)
             cmd.extend(("-v", "%s:/%s:rw" % (os.path.realpath(path), name)))
 
+    if args.root:
+        cmd.extend(("-u", "0:0"))
+    else:
+        cmd.extend(("-u", "%d:%d" % (os.getuid(), os.getgid())))
+        for group in os.getgroups():
+            cmd.extend(("--group-add", str(group)))
+
+    if sys.stdout.isatty():
+        cmd.extend(("-t", "-i"))
+
+    if not os.path.isdir(args.source):
+        die("source must be a directory: %r", args.source)
+
     cmd.extend(args.extra)
-    print(" ".join(map(repr, cmd)))
-
+    print(shellquote(cmd))
     return call(cmd)
-
-def entrypoint(argv):
-    if not argv:
-        argv = ["/bin/bash"]
-
-    mo = re.match(r"(\d+):(\d+):([\d+,]*)\Z", os.environ.get("DOCKER_RUN_DEV_ID", ""))
-    assert mo, "invalid DOCKER_RUN_DEV_ID"
-    uid = int(mo.group(1))
-    gid = int(mo.group(2))
-    groups = [int(x) for x in mo.group(3).split(",") if x]
-
-    pid = None
-    overlay.mount()
-    try:
-        pid = os.fork()
-        if pid:
-            # parent
-            code = os.waitpid(pid, 0)[1]
-            if os.WIFEXITED(code):
-                return os.WEXITSTATUS(code)
-            else:
-                sys.stderr.write("killed by signal %d\n" % os.WTERMSIG(code))
-                return 1
-        else:
-            # child
-            for name in "target", "cache":
-                path = "/" + name
-                if not os.path.exists(path):
-                    tmp = "/tmp/.docker-run-dev." + name
-                    os.mkdir(tmp)
-                    os.chown(tmp, uid, gid)
-                    os.symlink(tmp, path)
-
-            os.setgroups(groups)
-            os.setgid(gid)
-            os.setuid(uid)
-            os.environ["HOME"] = "/"
-
-            os.chdir("/source")
-
-            os.execvp(argv[0], argv)
-    finally:
-        if pid != 0:
-            overlay.umount()
 
 
 def main():
@@ -139,13 +87,8 @@ def main():
         args.extra.pop(0)
 
     try:
-        if os.getpid() != 1:
-            return run_docker(args)
-        else:
-            assert args.source=="."
-            assert not args.cache and not args.target
-            return entrypoint(args.extra)
-
+        with overlay(args.source) as source_mnt:
+            return run_docker(args, source_mnt)
     except SubprocessError as e:
         die("%s", e)
 

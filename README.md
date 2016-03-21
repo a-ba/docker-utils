@@ -84,9 +84,8 @@ Additionally `docker-devrun` provides two sweet features:
 
 ### Notes
 
- - python3 must be available inside the image
- - the kernel must support the overlay fs (available in linux >=3.18)
- - the container is run with CAP_SYS_ADMIN (to allow mounting the overlay filesystem)
+ - requires [unionfs-fuse](https://github.com/rpodgorny/unionfs-fuse) (fuse-based union filesystem)
+ - `user_allow_other` must be enabled in `/etc/fuse.conf`
 
 docker-diff
 -----------
