@@ -56,9 +56,6 @@ def run_docker(args, source):
         for group in os.getgroups():
             cmd.extend(("--group-add", str(group)))
 
-    if sys.stdout.isatty():
-        cmd.extend(("-t", "-i"))
-
     if not os.path.isdir(args.source):
         die("source must be a directory: %r", args.source)
 
