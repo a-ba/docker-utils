@@ -22,8 +22,11 @@ Additionally if the sending daemon supports the [`--exclude`](https://github.com
 
 <pre>
 usage:
-    docker-ssh pull [-h] [USER@]HOST[:PORT] IMAGE [IMAGE ...]
-    docker-ssh push [-h] [USER@]HOST[:PORT] IMAGE [IMAGE ...]
+    docker-ssh pull [-h] [USER@]HOST[:PORT][:DOCKER_URL] IMAGE [IMAGE ...]
+    docker-ssh push [-h] [USER@]HOST[:PORT][:DOCKER_URL] IMAGE [IMAGE ...]
+
+    docker-ssh pull [-h] DOCKER_URL IMAGE [IMAGE ...]
+    docker-ssh push [-h] DOCKER_URL IMAGE [IMAGE ...]
 </pre>
 
 

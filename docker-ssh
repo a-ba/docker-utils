@@ -3,8 +3,11 @@
 # docker-ssh: push and pull docker images over ssh
 #
 # usage:
-#   docker-ssh pull [-h] [USER@]HOST[:PORT] IMAGE [IMAGE ...]
-#   docker-ssh push [-h] [USER@]HOST[:PORT] IMAGE [IMAGE ...]
+#   docker-ssh pull [-h] [USER@]HOST[:PORT][:DOCKER_URL] IMAGE [IMAGE ...]
+#   docker-ssh push [-h] [USER@]HOST[:PORT][:DOCKER_URL] IMAGE [IMAGE ...]
+#
+#   docker-ssh pull [-h] DOCKER_URL IMAGE [IMAGE ...]
+#   docker-ssh push [-h] DOCKER_URL IMAGE [IMAGE ...]
 #
 # This script uses `docker save` `docker load` and a ssh session to transfer
 # images from/to a docker daemon running on a remote host.
@@ -19,17 +22,33 @@ PROG = "docker-ssh"
 
 log = logging.getLogger(PROG)
 
-class SshSession:
-    def __init__(self, user, host, port):
+class Session:
+
+    def cmd(self, args=[]):
+        raise NotImplementedError()
+
+    def __enter__(self):
+        return self
+
+    def wait_ready(self):
+        pass
+
+    def __exit__(self, a, b, c):
+        pass
+
+class SshSession(Session):
+    def __init__(self, user, host, port, url):
         self.user = user
         self.host = host
         self.port = port
         self.proc = None
+        self.url  = url
 
-    def cmd(self, args=[], opt=()):
+    def cmd(self, args=[]):
         cmd = list(self.basecmd)
-        cmd.extend(opt)
         cmd.append(self.host)
+        if self.url is not None:
+            cmd.extend(["/usr/bin/env", "DOCKER_HOST=" + self.url])
         assert isinstance(args, list)
         cmd.extend(args)
         return cmd
@@ -45,7 +64,7 @@ class SshSession:
         if self.port:
             self.basecmd.extend(["-p", self.port])
 
-        cmd = self.cmd(opt=["-MN"])
+        cmd = self.basecmd + ["-MN", self.host]
         log_exec(cmd)
         self.proc = subprocess.Popen(cmd)
         return self
@@ -63,6 +82,15 @@ class SshSession:
         finally:
             self.tmpdir.cleanup()
             self.tmpdir.__exit__(a, b, c)
+
+
+class UrlSession(Session):
+    def __init__(self, url):
+        self.url = url
+
+    def cmd(self, args=[]):
+        return ["/usr/bin/env", "DOCKER_HOST=" + self.url] + args
+
 
 def log_exec(cmd):
     log.debug("exec: %s", ((" ".join(map(repr, cmd))) if isinstance(cmd, list) else cmd))
@@ -178,13 +206,13 @@ def main():
 
     
     p = sub.add_parser("push", help="push images to the remote host")
-    p.add_argument("remote", metavar="[USER@]HOST[:PORT]",
+    p.add_argument("remote", metavar="[USER@]HOST[:PORT][:DOCKER_URL]",
             help="paramenters to connect to the remote docker daemon")
     p.add_argument("images", metavar="IMAGE", nargs="+",
             help="docker images to be pushed")
 
     p = sub.add_parser("pull", help="pull images from the remote host")
-    p.add_argument("remote", metavar="[USER@]HOST[:PORT]",
+    p.add_argument("remote", metavar="[USER@]HOST[:PORT][:DOCKER_URL]",
             help="paramenters to connect to the remote docker daemon")
     p.add_argument("images", metavar="IMAGE", nargs="+",
             help="docker images to be pulled")
@@ -196,14 +224,18 @@ def main():
     if not args.command:
         parser.print_help()
         sys.exit(1)
+    
+    if re.match(r"[a-z]+://", args.remote):
+        session = UrlSession(args.remote)
+    else:
+        mo = re.match(r"(?:([^:@/\s]+)@)?([^:@/\s]+)(?::([^:@/\s]+))?(?::([a-z]+://.*))?$", args.remote, re.I)
+        if not mo:
+            die("remote host must match: [USER@]HOST[:PORT][:DOCKER_URL] or DOCKER_URL")
 
-    mo = re.match(r"(?:([^:@/\s]+)@)?([^:@/\s]+)(?::([^:@/\s]+))?$", args.remote, re.I)
-    if not mo:
-        die("remote host must match: [USER@]HOST[:PORT]")
+        args.user, args.host, args.port, args.url = mo.groups()
+        session = SshSession(*mo.groups())
 
-    args.user, args.host, args.port = mo.groups()
-
-    with SshSession(args.user, args.host, args.port) as session:
+    with session:
         if args.command == "push":
             push(session, args.images)
         elif args.command == "pull":
