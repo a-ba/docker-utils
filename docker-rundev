@@ -34,7 +34,7 @@ def overlay(source):
             check_call(["unionfs-fuse", "-o", "cow,allow_root", "%s=RW:%s=RO" % (diff, source), mnt])
             yield mnt
         finally:
-            check_call(["fusermount", "-u", mnt])
+            call(["fusermount", "-u", mnt])
 
 
 def run_docker(args, source):
