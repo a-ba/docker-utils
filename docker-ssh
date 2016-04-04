@@ -16,7 +16,18 @@
 # as not to transfer images that are already present in the destination daemon.
 #
 
-import argparse, logging, os, re, shutil, subprocess, sys, tempfile, time
+import argparse
+import io
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
 
 PROG = "docker-ssh"
 
@@ -127,7 +138,7 @@ def check_support_load_print_excludes(cmd_filter = lambda x:x):
     return b"--print-excludes" in err
 
 
-def do_transfer(session, images, src, dst, can_exclude, can_print_excludes):
+def do_transfer(session, images, src, dst, can_exclude, can_print_excludes, add_pfx, rm_pfx):
     ssh = " ".join(map(repr, session.cmd()))
     params = dict(
         images  = " ".join(map(repr, images)),
@@ -143,18 +154,54 @@ def do_transfer(session, images, src, dst, can_exclude, can_print_excludes):
         log.warning(msg + " ==> fallback to full image export", *k)
         excludes.clear()
 
+    def abort_if_pfx(role):
+        if add_pfx or rm_pfx:
+            if role == "send":
+                die("--add-prefix/--remove-prefix requires the sending daemon to support 'docker save --excludes=all'")
+            else:
+                die("--add-prefix/--remove-prefix requires the receiving daemon to support 'docker load --print-excludes'")
+
+    def prepare_translation():
+        images = []
+        tf = tarfile.open(fileobj=io.BytesIO(
+            run("{src_ssh} docker save --exclude=all {images}".format(**params), shell=True)))
+        for entry in json.loads(tf.extractfile("manifest.json").read().decode()):
+            img  = "sha256:" + re.match(r"([0-9a-f]{64})\.json\Z", entry["Config"]).group(1)
+            images.append(img)
+
+            for old_tag in entry["RepoTags"] or ():
+                if rm_pfx:
+                    if not old_tag.startswith(rm_pfx):
+                        die("tag %r does not start with prefix %r" % (old_tag, rm_pfx))
+                    new_tag = add_pfx + old_tag[len(rm_pfx):]
+                else:
+                    new_tag = add_pfx + old_tag
+
+                tag_dict[new_tag] = img
+                log.info("tag %r translated to %r", old_tag, new_tag)
+
+        # override the list of images to be transferred
+        params["images"] = " ".join(map(repr, images))
+
+    tag_dict = {}
+
     if can_exclude == "yes":
         log.info("%s: 'docker save --exclude==all' supported", src)
 
         if can_print_excludes:
+            if add_pfx or rm_pfx:
+                prepare_translation()
+
             log.info("%s: 'docker load --print-excludes' supported", dst)
             excludes = run("{src_ssh} docker save --exclude=all {images} | {dst_ssh} docker load --print-excludes"
                         .format(**params), shell=True).decode().splitlines()
         else:
+            abort_if_pfx("recv")
             fallback("%s: 'docker load --print-excludes' not supported", dst)
 
     elif can_exclude == "old":
         log.info("%s: 'docker save --excludes' supported (old docker < 1.10.0)", src)
+        abort_if_pfx("send")
 
         if can_print_excludes:
             excludes.append(":")
@@ -165,29 +212,36 @@ def do_transfer(session, images, src, dst, can_exclude, can_print_excludes):
         if excludes and ":" in excludes[0]:
             fallback("%s: unable to list legacy layers (docker >= 1.10.0)", dst)
     else:
+        abort_if_pfx("send")
         fallback("%s: 'docker save --excludes' not supported", src)
 
     run("{src_ssh} docker save {exclude} {images} {pipe} {dst_ssh} docker load".format(
                 exclude = (" ".join("--exclude %s" % x for x in excludes)),
                 **params), shell=True)
 
+    # apply translation
+    for tag, img in tag_dict.items():
+        run("{dst_ssh} docker tag {img!r} {tag!r}".format(img=img, tag=tag, **params), shell=True)
 
-def pull(session, images):
+
+def pull(session, images, add_pfx, rm_pfx):
 
     can_print_excludes = check_support_load_print_excludes()
     session.wait_ready()
     can_exclude = check_support_save_exclude(session.cmd)
 
-    do_transfer(session, images, "remote", "local", can_exclude, can_print_excludes)
+    do_transfer(session, images, "remote", "local", can_exclude, can_print_excludes,
+            add_pfx, rm_pfx)
 
 
-def push(session, images):
+def push(session, images, add_pfx, rm_pfx):
 
     can_exclude = check_support_save_exclude()
     session.wait_ready()
     can_print_excludes = check_support_load_print_excludes(session.cmd)
 
-    do_transfer(session, images, "local", "remote", can_exclude, can_print_excludes)
+    do_transfer(session, images, "local", "remote", can_exclude, can_print_excludes,
+            add_pfx, rm_pfx)
 
 
 def main():
@@ -204,18 +258,21 @@ def main():
 
     sub = parser.add_subparsers(dest="command", help="sub-command help")
 
+    def add_push_pull_cmd(name, help):
+        p = sub.add_parser(name, help=help, usage=
+                "\n\t%(prog)s [USER@]HOST[:PORT][:DOCKER_URL] IMAGE [ IMAGE... ]"
+                "\n\t%(prog)s DOCKER_URL                      IMAGE [ IMAGE... ]")
+        p.add_argument("--add-prefix", default="", metavar="PREFIX",
+                help="prefix to be prepended to the image name (in the destination daemon)")
+        p.add_argument("--remove-prefix", default="", metavar="PREFIX",
+                help="prefix to be removed from the image name (in the destination daemon)")
+        p.add_argument("remote", metavar="[USER@]HOST[:PORT][:DOCKER_URL]",
+                help="paramenters to connect to the remote docker daemon")
+        p.add_argument("images", metavar="IMAGE", nargs="+",
+                help="docker images to be transferred")
     
-    p = sub.add_parser("push", help="push images to the remote host")
-    p.add_argument("remote", metavar="[USER@]HOST[:PORT][:DOCKER_URL]",
-            help="paramenters to connect to the remote docker daemon")
-    p.add_argument("images", metavar="IMAGE", nargs="+",
-            help="docker images to be pushed")
-
-    p = sub.add_parser("pull", help="pull images from the remote host")
-    p.add_argument("remote", metavar="[USER@]HOST[:PORT][:DOCKER_URL]",
-            help="paramenters to connect to the remote docker daemon")
-    p.add_argument("images", metavar="IMAGE", nargs="+",
-            help="docker images to be pulled")
+    add_push_pull_cmd("push", help="push images to the remote host")
+    add_push_pull_cmd("pull", help="pull images from the remote host")
 
     args = parser.parse_args()
 
@@ -237,9 +294,9 @@ def main():
 
     with session:
         if args.command == "push":
-            push(session, args.images)
+            push(session, args.images, args.add_prefix, args.remove_prefix)
         elif args.command == "pull":
-            pull(session, args.images)
+            pull(session, args.images, args.add_prefix, args.remove_prefix)
 
 main()
 

@@ -18,7 +18,9 @@ docker-ssh
 
 This is a wrapper around `docker save` and `docker load` for transferring images directly between two docker daemons (without going through a registry).
 
-Additionally if the sending daemon supports the [`--exclude`](https://github.com/docker/docker/pull/9304) option in `docker save` ([latest patch available here](https://github.com/a-ba/docker/tree/3870-partial-save)) this script automatically detects it and use it to avoid transmitting the layers that are already present in the receiving daemon (only the new layers are sent).
+If the sending daemon supports the [`--exclude`](https://github.com/docker/docker/pull/9304) option in `docker save` ([latest patch available here](https://github.com/a-ba/docker/tree/3870-partial-save)) this script automatically detects it and use it to avoid transmitting the layers that are already present in the receiving daemon (only the new layers are sent).
+
+The command also allow translating image names (adding or removing a prefix). For example, with `docker push --add-prefix PFX/ HOST IMG` the resulting image in the remote daemon will be named `PFX/IMG`.
 
 <pre>
 usage:
@@ -27,6 +29,10 @@ usage:
 
     docker-ssh pull [-h] DOCKER_URL IMAGE [IMAGE ...]
     docker-ssh push [-h] DOCKER_URL IMAGE [IMAGE ...]
+
+optional arguments:
+  --add-prefix PREFIX    prefix to be prepended to the image name
+  --remove-prefix PREFIX prefix to be removed from the image name
 </pre>
 
 
