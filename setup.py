@@ -7,7 +7,7 @@ assert sys.version_info[0] > 2, "python2 not supported"
 
 setup(
     name        = "docker-utils-aba",
-    version     = "0.0.7",
+    version     = "0.0.8",
     scripts     = """
         docker-diff
         docker-remove-untagged-images
