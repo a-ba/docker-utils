@@ -110,6 +110,27 @@ This command is useful for writing a Dockerfile. The typical use case is when yo
 Unfortunately the native docker client does not provide a straightforward way to generate a patch from differences made inside a docker container (`docker diff` provides only a summary of the changes).
 
 
+docker-nsenter
+----------
+
+**Wrapper for nsenter that accepts a docker container as target**
+
+<pre>
+usage: docker-nsenter -t CONTAINER  &lt;nsenter args...&gt;
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -t CONTAINER, --target CONTAINER
+                        target docker container
+</pre>
+
+[nsenter](http://man7.org/linux/man-pages/man1/nsenter.1.html) is a very nice command for debugging live containers. It allows entering only a subset of the container namespaces, for example to run an admin command that is not installed inside the container:
+
+<pre>
+docker-nsenter -t mycontainer --net netstat -anp
+</pre>
+
+
 mininit
 -------
 

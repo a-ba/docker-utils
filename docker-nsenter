@@ -1,0 +1,21 @@
+#!/usr/bin/python3
+
+import argparse
+import os
+import subprocess
+import sys
+
+
+parser = argparse.ArgumentParser(usage="docker-nsenter -t CONTAINER  <nsenter args...>",
+        description = "Wrapper for nsenter that accepts a docker container as target")
+parser.add_argument("-t", "--target", metavar="CONTAINER", required=True,
+        help="target docker container")
+
+args, nsargs = parser.parse_known_args()
+
+try:
+    pid = int(subprocess.check_output(["docker", "inspect", "-f", "{{.State.Pid}}", "--", args.target]))
+except subprocess.CalledProcessError as e:
+    sys.exit(e.returncode)
+
+os.execl("/usr/bin/nsenter", "nsenter", "-t", str(pid), *nsargs)

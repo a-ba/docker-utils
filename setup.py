@@ -7,9 +7,10 @@ assert sys.version_info[0] > 2, "python2 not supported"
 
 setup(
     name        = "docker-utils-aba",
-    version     = "0.0.8",
+    version     = "0.0.9",
     scripts     = """
         docker-diff
+        docker-nsenter
         docker-remove-untagged-images
         docker-remove-zombies
         docker-rundev
