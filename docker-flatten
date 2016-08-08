@@ -1,0 +1,185 @@
+#!/usr/bin/python3
+
+import argparse
+import contextlib
+import re
+import subprocess
+import sys
+
+import docker
+
+def die(msg, *k):
+    sys.stderr.write("error: %s\n" % (msg % k))
+    sys.exit(1)
+
+def split_repotag(txt):
+    """"REPO:TAG" --> ("REPO", "TAG")"""
+    return re.match(r"(.*):([^/]+)\Z", txt).groups()
+
+@contextlib.contextmanager
+def tmp_container(image, **kw):
+    cid = None
+    try:
+        result = client.create_container(image, **kw)
+        cid = result["Id"]
+        if result["Warnings"]:
+            sys.stderr.write("warning: %s\n" % result["Warnings"])
+        yield cid
+    finally:
+        if cid is not None:
+            client.remove_container(cid)
+
+def remove(image):
+    try:
+        client.remove_image(image)
+    except docker.errors.APIError as e:
+        sys.stderr.write("warning: unable to remove image %s (%s)\n" % (
+            image, e.explanation.decode()))
+
+def flatten(image, tag = None):
+    info = client.inspect_image(image)
+
+    orig = image
+    if tag:
+        orig += " (%s)" % tag
+
+    proc1 = proc2 = None
+    base_image = commit_image = new_image = None
+    try:
+        # create the base image
+        with tmp_container(image, command=[""]) as cid:
+            proc1 = subprocess.Popen(["docker", "export", "--", cid],
+                    stdout=subprocess.PIPE)
+            proc2 = subprocess.Popen(["docker", "import", "--message", "data     from "+orig, "-"],
+                    stdin=proc1.stdout, stdout=subprocess.PIPE)
+            proc1.stdout.close()
+
+            out, _ = proc2.communicate()
+
+            base_image = out.strip().decode()
+
+            if proc1.wait():
+                die("docker export failed")
+            if proc2.wait():
+                die("docker import failed")
+
+        # add the metadata (commit)
+        with tmp_container(base_image, command=[""]) as cid:
+            new_image = client.commit(cid,
+                    message = "metadata from "+orig,
+                    author  = info.get("Author", ""),
+                    conf    = info["Config"],
+                    )["Id"]
+
+        return new_image
+
+    finally:
+        for p in proc1, proc2:
+            if p is not None and p.returncode is None:
+                try:
+                    p.kill()
+                except OSError:
+                    pass
+
+        if base_image and not new_image:
+            remove(base_image)
+
+def verify(old_image, new_image):
+    old_cfg = client.inspect_image(old_image)["Config"]
+    new_cfg = client.inspect_image(new_image)["Config"]
+
+    differences = []
+    for key in sorted(set(old_cfg).union(new_cfg)):
+        old = old_cfg.get(key)
+        new = new_cfg.get(key)
+        if new != old and (old or new):
+            diff = (key, old, new)
+            if key == "Cmd" and old is None and new == [""]:
+                # NOTE: it is not possible to keep Cmd=None in the new image
+                # (because we cannot commit the metadata without creating a
+                # container and we cannot create a container without a command) 
+                sys.stderr.write("warning: config is altered in the new image:\n\t%-20s old=%r new=%r\n" % diff)
+                continue
+            differences.append(diff)
+
+    if differences:
+        raise RuntimeError("config is altered in the new image:" + "".join(
+                "\n\t%-20s old=%r new=%r" % d for d in differences))
+
+
+def main():
+    global client
+
+    parser = argparse.ArgumentParser(description="Flatten docker images",
+            epilog="""This command merges all layers from a given image into
+            a single one. Its implementation is based on 'docker export/docker
+            import'. Note that because the process implies creating a temporary
+            container, the resulting image has slight differences with the
+            original image (eg. /etc/hostname, ...)""")
+    parser.add_argument("images", metavar="IMAGE", nargs="+",
+            help = "docker image to be flattened")
+    parser.add_argument("-t", "--tag",
+            help = "tag for the resulting image")
+    parser.add_argument("--replace", action="store_true",
+            help = "replace the current tag")
+    parser.add_argument("--backup", metavar="SUFFIX",
+            help = "keep a tag on the previous image (with SUFFIX appended to the tag version)")
+
+    args = parser.parse_args()
+    if args.tag and args.replace:
+        die("argument conflict: --replace and --tag cannot be used together")
+
+    if args.backup and not args.replace:
+        die("--backup is not useable without --replace")
+
+    if args.tag and len(args.images)>1:
+        die("--tag cannot be used with multiple images")
+
+    if args.tag and not re.search(r":[^/]+\Z", args.tag):
+        args.tag += ":latest"
+
+    client = docker.Client()
+
+    for image in args.images:
+
+        js = client.inspect_image(image)
+        old_id = js["Id"]
+
+        # if image is a tag then set old_tag to this tag
+        for old_tag in image, (image+":latest"):
+            if old_tag in js.get("RepoTags", ()):
+                break
+        else:
+            old_tag = None
+
+        backup_tag = None
+        if args.replace:
+            if old_tag is None:
+                die("error: cannot flatten %s (-u must be used with a tag)\n" % image)
+            new_tag = old_tag
+            if args.backup:
+                assert ":" in old_tag
+                backup_tag = old_tag + args.backup
+                try:
+                    client.inspect_image(backup_tag)
+                    die("there is an existing image with tag %r" % backup_tag)
+                except docker.errors.NotFound:
+                    pass
+        else:
+            new_tag = args.tag
+
+        new_id = None
+        try:
+            new_id = flatten(old_id, old_tag)
+            verify(old_id, new_id)
+            print(new_id)
+            if backup_tag:
+                client.tag(old_id, *split_repotag(backup_tag))
+            if new_tag:
+                client.tag(new_id, *split_repotag(new_tag))
+        except:
+            if new_id:
+                remove(new_id)
+            raise
+
+sys.exit(main())

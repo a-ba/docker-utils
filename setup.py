@@ -10,6 +10,7 @@ setup(
     version     = "0.0.10",
     scripts     = """
         docker-diff
+        docker-flatten
         docker-nsenter
         docker-remove-untagged-images
         docker-remove-zombies
