@@ -1,6 +1,6 @@
 #!/bin/sh
 
-ctrs="`docker ps -aq --no-trunc -f status=exited -f status=created`"
+ctrs="`docker ps -aq --no-trunc -f status=exited -f status=created -f status=dead`"
 
 [ -z "$ctrs" ] || docker rm -- $ctrs
 
