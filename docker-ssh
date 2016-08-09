@@ -17,6 +17,7 @@
 #
 
 import argparse
+import contextlib
 import io
 import json
 import logging
@@ -33,6 +34,60 @@ PROG = "docker-ssh"
 
 log = logging.getLogger(PROG)
 
+def die(msg):
+    sys.stderr.write("%s: %s\n" % (PROG, msg))
+    sys.exit(1)
+
+def log_exec(cmd):
+    log.debug("exec: %s", ((" ".join(map(repr, cmd))) if isinstance(cmd, list) else cmd))
+
+def check_output(cmd, *k, **kw):
+    log_exec(cmd)
+    return subprocess.check_output(cmd, *k, **kw)
+
+@contextlib.contextmanager
+def process(cmd, *k, **kw):
+    proc = None
+    try:
+        log_exec(cmd)
+        proc = subprocess.Popen(cmd, *k, **kw)
+        yield proc
+        code = proc.wait()
+        if code:
+            raise subprocess.CalledProcessError(code, cmd)
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                log.debug("kill process: %r", cmd)
+                proc.kill()
+            except OSError:
+                pass
+
+class Pipe:
+    def __init__(self, pv = False):
+        if pv and shutil.which("pv"):
+            self.rd, self._wr = os.pipe()
+            self._rd, self.wr = os.pipe()
+        else:
+            self.rd, self.wr = os.pipe()
+
+    def close(self):
+        os.close(self.rd)
+        os.close(self.wr)
+
+    def __enter__(self):
+        if hasattr(self, "_rd"):
+            self._proc = process(["pv"], stdin=self._rd, stdout=self._wr)
+            self._proc.__enter__()
+            os.close(self._rd)
+            os.close(self._wr)
+        return self
+
+    def __exit__(self, *k):
+        if hasattr(self, "_proc"):
+            self._proc.__exit__(*k)
+
+
 class Session:
 
     def cmd(self, args=[]):
@@ -46,6 +101,41 @@ class Session:
 
     def __exit__(self, a, b, c):
         pass
+
+    def can_save_exclude(self):
+        return bool(re.search(
+            b"--exclude.* Layers not to be included",
+            check_output(self.cmd(["docker", "save", "--help"]))))
+
+    def can_load_print_excludes(self):
+        return b"--print-excludes" in check_output(
+                self.cmd(["docker", "load", "--help"]))
+
+    def save(self, images, *, stdout=None, exclude=()):
+
+        cmd = ["docker", "save"]
+        for img in exclude:
+            cmd.extend(("--exclude", img))
+        cmd.append("--")
+        cmd.extend(images)
+
+        return process(self.cmd(cmd), stdout=stdout)
+
+    def load(self, *, stdin=None, stdout=None, print_excludes=False):
+
+        cmd = ["docker", "load"]
+        if print_excludes:
+            cmd.append("--print-excludes")
+
+        return process(self.cmd(cmd), stdin=stdin, stdout=stdout)
+
+    def tag(self, img, tag):
+        check_output(self.cmd(["docker", "tag", "--", img, tag]))
+
+
+class LocalSession(Session):
+    def cmd(self, args=[]):
+        return list(args)
 
 class SshSession(Session):
     def __init__(self, user, host, port, url):
@@ -103,56 +193,33 @@ class UrlSession(Session):
         return ["/usr/bin/env", "DOCKER_HOST=" + self.url] + args
 
 
-def log_exec(cmd):
-    log.debug("exec: %s", ((" ".join(map(repr, cmd))) if isinstance(cmd, list) else cmd))
+def prepare_translation(src, images, add_pfx, rm_pfx):
 
-def run(cmd, *, input="", fail_silently=False, **kw):
-    log_exec(cmd)
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, **kw)
-    out, err = proc.communicate(input)
+    with src.save(images, exclude=["all"], stdout=subprocess.PIPE) as proc:
+        rawtar = io.BytesIO(proc.stdout.read())
+    tf = tarfile.open(fileobj=rawtar)
 
-    if proc.returncode:
-        if fail_silently:
-            return None
-        die("subprocess returned error code %d" % proc.returncode)
-    return out
+    tag_dict = {}
+    image_ids = []
+    for entry in json.loads(tf.extractfile("manifest.json").read().decode()):
+        img  = "sha256:" + re.match(r"([0-9a-f]{64})\.json\Z", entry["Config"]).group(1)
+        image_ids.append(img)
 
-def run_err(cmd, *, input="", **kw):
-    log_exec(cmd)
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kw)
-    out, err = proc.communicate(input)
-    return out, proc.returncode
+        for old_tag in entry["RepoTags"] or ():
+            if rm_pfx:
+                if not old_tag.startswith(rm_pfx):
+                    die("tag %r does not start with prefix %r" % (old_tag, rm_pfx))
+                new_tag = add_pfx + old_tag[len(rm_pfx):]
+            else:
+                new_tag = add_pfx + old_tag
 
-def die(msg):
-    sys.stderr.write("%s: %s\n" % (PROG, msg))
-    sys.exit(1)
+            tag_dict[new_tag] = img
+            log.info("tag %r translated to %r", old_tag, new_tag)
 
-def check_support_save_exclude(cmd_filter = lambda x:x):
-    err, code = run_err(cmd_filter(["docker", "save", "--help"]))
-    mo = re.search(b"--exclude(.*Images not to be included)?", err)
-    if mo:
-        return "old" if mo.group(1) else "yes"
-
-def check_support_load_print_excludes(cmd_filter = lambda x:x):
-    err, code = run_err(cmd_filter(["docker", "load", "--help"]))
-    return b"--print-excludes" in err
+    return image_ids, tag_dict
 
 
-def do_transfer(session, images, src, dst, can_exclude, can_print_excludes, add_pfx, rm_pfx):
-    ssh = " ".join(map(repr, session.cmd()))
-    params = dict(
-        images  = " ".join(map(repr, images)),
-        src_ssh = ("" if src == "local" else ssh),
-        dst_ssh = ("" if dst == "local" else ssh),
-        pipe    = ("| pv |" if shutil.which("pv") else "|"),
-    )
-    del ssh
-    assert params["src_ssh"] != params["dst_ssh"]
-
-    excludes = []
-    def fallback(msg, *k):
-        log.warning(msg + " ==> fallback to full image export", *k)
-        excludes.clear()
+def do_transfer(src, dst, images, add_pfx, rm_pfx):
 
     def abort_if_pfx(role):
         if add_pfx or rm_pfx:
@@ -161,88 +228,50 @@ def do_transfer(session, images, src, dst, can_exclude, can_print_excludes, add_
             else:
                 die("--add-prefix/--remove-prefix requires the receiving daemon to support 'docker load --print-excludes'")
 
-    def prepare_translation():
-        images = []
-        tf = tarfile.open(fileobj=io.BytesIO(
-            run("{src_ssh} docker save --exclude=all {images}".format(**params), shell=True)))
-        for entry in json.loads(tf.extractfile("manifest.json").read().decode()):
-            img  = "sha256:" + re.match(r"([0-9a-f]{64})\.json\Z", entry["Config"]).group(1)
-            images.append(img)
-
-            for old_tag in entry["RepoTags"] or ():
-                if rm_pfx:
-                    if not old_tag.startswith(rm_pfx):
-                        die("tag %r does not start with prefix %r" % (old_tag, rm_pfx))
-                    new_tag = add_pfx + old_tag[len(rm_pfx):]
-                else:
-                    new_tag = add_pfx + old_tag
-
-                tag_dict[new_tag] = img
-                log.info("tag %r translated to %r", old_tag, new_tag)
-
-        # override the list of images to be transferred
-        params["images"] = " ".join(map(repr, images))
 
     tag_dict = {}
+    exclude = ()
 
-    if can_exclude == "yes":
-        log.info("%s: 'docker save --exclude==all' supported", src)
-
-        if can_print_excludes:
-            if add_pfx or rm_pfx:
-                prepare_translation()
-
-            log.info("%s: 'docker load --print-excludes' supported", dst)
-            excludes = run("{src_ssh} docker save --exclude=all {images} | {dst_ssh} docker load --print-excludes"
-                        .format(**params), shell=True).decode().splitlines()
-        else:
-            abort_if_pfx("recv")
-            fallback("%s: 'docker load --print-excludes' not supported", dst)
-
-    elif can_exclude == "old":
-        log.info("%s: 'docker save --excludes' supported (old docker < 1.10.0)", src)
+    if not src.can_save_exclude():
         abort_if_pfx("send")
+        log.warning("source does not support 'docker save --exclude' ==> fallback to full image export")
 
-        if can_print_excludes:
-            excludes.append(":")
-        else:
-            excludes = run("{dst_ssh} docker images -aq --no-trunc"
-                            .format(**params), shell=True).decode().splitlines()
+    elif not dst.can_load_print_excludes():
+        abort_if_pfx("recv")
+        log.warning("destination does not support 'docker load --print-exclude' ==> fallback to full image export")
 
-        if excludes and ":" in excludes[0]:
-            fallback("%s: unable to list legacy layers (docker >= 1.10.0)", dst)
     else:
-        abort_if_pfx("send")
-        fallback("%s: 'docker save --excludes' not supported", src)
+        if add_pfx or rm_pfx:
+            images, tag_dict = prepare_translation(src, images, add_pfx, rm_pfx)
 
-    run("{src_ssh} docker save {exclude} {images} {pipe} {dst_ssh} docker load".format(
-                exclude = (" ".join("--exclude %s" % x for x in excludes)),
-                **params), shell=True)
+        with    Pipe() as pipe,                                     \
+                src.save(images, exclude=["all"], stdout=pipe.wr),  \
+                dst.load(print_excludes=True,     stdin =pipe.rd, stdout=subprocess.PIPE) as proc:
+            pipe.close()
+            exclude = proc.communicate()[0].decode().splitlines()
+
+
+    with    Pipe(pv=True) as pipe,                                     \
+            src.save(images, exclude=exclude, stdout=pipe.wr),  \
+            dst.load(stdin=pipe.rd):
+        pipe.close()
 
     # apply translation
     for tag, img in tag_dict.items():
-        run("{dst_ssh} docker tag {img!r} {tag!r}".format(img=img, tag=tag, **params), shell=True)
+        dst.tag(img, tag)
 
 
-def pull(session, images, add_pfx, rm_pfx):
+def create_session(url):
 
-    can_print_excludes = check_support_load_print_excludes()
-    session.wait_ready()
-    can_exclude = check_support_save_exclude(session.cmd)
+    if re.match(r"[a-z]+://", url):
+        return UrlSession(url)
 
-    do_transfer(session, images, "remote", "local", can_exclude, can_print_excludes,
-            add_pfx, rm_pfx)
+    mo = re.match(r"(?:([^:@/\s]+)@)?([^:@/\s]+)(?::([^:@/\s]+))?(?::([a-z]+://.*))?$", url, re.I)
+    if not mo:
+        die("remote host must match: [user@]host[:port][:docker_url] or docker_url")
 
-
-def push(session, images, add_pfx, rm_pfx):
-
-    can_exclude = check_support_save_exclude()
-    session.wait_ready()
-    can_print_excludes = check_support_load_print_excludes(session.cmd)
-
-    do_transfer(session, images, "local", "remote", can_exclude, can_print_excludes,
-            add_pfx, rm_pfx)
-
+    user, host, port, url = mo.groups()
+    return SshSession(user, host, port, url)
 
 def main():
     def loglevel(value):
@@ -281,22 +310,22 @@ def main():
     if not args.command:
         parser.print_help()
         sys.exit(1)
-    
-    if re.match(r"[a-z]+://", args.remote):
-        session = UrlSession(args.remote)
+
+    local  = LocalSession()
+    remote = create_session(args.remote)
+
+    if args.command == "pull":
+        src, dst = remote, local
+    elif args.command == "push":
+        src, dst = local, remote
     else:
-        mo = re.match(r"(?:([^:@/\s]+)@)?([^:@/\s]+)(?::([^:@/\s]+))?(?::([a-z]+://.*))?$", args.remote, re.I)
-        if not mo:
-            die("remote host must match: [USER@]HOST[:PORT][:DOCKER_URL] or DOCKER_URL")
+        raise NotImplementedError(args.command)
+ 
+    with src, dst:
+        src.wait_ready()
+        dst.wait_ready()
 
-        args.user, args.host, args.port, args.url = mo.groups()
-        session = SshSession(*mo.groups())
-
-    with session:
-        if args.command == "push":
-            push(session, args.images, args.add_prefix, args.remove_prefix)
-        elif args.command == "pull":
-            pull(session, args.images, args.add_prefix, args.remove_prefix)
+        do_transfer(src, dst, args.images, args.add_prefix, args.remove_prefix)
 
 main()
 
