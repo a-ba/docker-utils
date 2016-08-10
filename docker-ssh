@@ -439,6 +439,8 @@ def main():
                 help="prefix to be prepended to the image name (in the destination daemon)")
         p.add_argument("--remove-prefix", default="", metavar="PREFIX",
                 help="prefix to be removed from the image name (in the destination daemon)")
+        p.add_argument("--local", metavar="URL", default="local:",
+                help="use an arbitrary docker daemon instead of the default local daemon")
         p.add_argument("remote", metavar="URL",
                 help="""url identifying the remote node: either a docker url:
                 unix://, tcp://, ... or a ssh account:
@@ -457,7 +459,7 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    local  = create_session("local:")
+    local  = create_session(args.local)
 
     if "." not in args.images:
         remote = create_session(args.remote)

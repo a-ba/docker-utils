@@ -52,6 +52,9 @@ positional arguments:
 optional arguments:
   --add-prefix PREFIX    prefix to be prepended to the image name
   --remove-prefix PREFIX prefix to be removed from the image name
+  --local URL            use an arbitrary docker daemon instead of
+                         the default local daemon
+
 </pre>
 
 
