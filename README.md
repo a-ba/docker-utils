@@ -18,17 +18,36 @@ docker-ssh
 
 This is a wrapper around `docker save` and `docker load` for transferring images directly between two docker daemons (without going through a registry).
 
-If the sending daemon supports the [`--exclude`](https://github.com/docker/docker/pull/9304) option in `docker save` ([latest patch available here](https://github.com/a-ba/docker/tree/3870-partial-save)) this script automatically detects it and use it to avoid transmitting the layers that are already present in the receiving daemon (only the new layers are sent).
+The remote daemon is identified with a URL, which can be:
+
+  - a string identifying ssh account
+    - _hostname_ 
+    - _user@hostname_
+    - _user@hostname:port_
+  - a docker url
+    - _unix:///var/run/mydocker.sock_
+    - _tcp://1.2.3.4_
+  - a ssh account followed by a docker url
+    - _user@hostname:tcp://4.5.6.7_
+
+The `push` command may work with multiple destinations (to deploy the same image to multiple nodes in one shot).
+
+If the sending daemon supports the [`--exclude`](https://github.com/docker/docker/pull/9304) option in `docker save` ([latest patch available here](https://github.com/a-ba/docker/tree/3870-partial-save)) this script automatically detects it and use it to avoid transmitting the layers that are already present in the receiving daemon (only the new layers are sent). Note that with multiple destinations, the resulting exclude list is the intersection of the lists given by all receiving daemons (all daemons receive the same data).
 
 The command also allow translating image names (adding or removing a prefix). For example, with `docker push --add-prefix PFX/ HOST IMG` the resulting image in the remote daemon will be named `PFX/IMG`.
 
 <pre>
 usage:
-    docker-ssh pull [-h] [USER@]HOST[:PORT][:DOCKER_URL] IMAGE [IMAGE ...]
-    docker-ssh push [-h] [USER@]HOST[:PORT][:DOCKER_URL] IMAGE [IMAGE ...]
+    docker-ssh pull URL IMAGE [IMAGE ...]    
 
-    docker-ssh pull [-h] DOCKER_URL IMAGE [IMAGE ...]
-    docker-ssh push [-h] DOCKER_URL IMAGE [IMAGE ...]
+    docker-ssh push URL IMAGE [IMAGE ...]
+    docker-ssh push URL [URL ...] . IMAGE [IMAGE ...]
+
+positional arguments:
+  URL                    url identifying the remote node: either a
+                         docker url: unix://, tcp://, ... or a ssh
+                         account: [USER@]HOST[:PORT][:DOCKER_URL]
+  IMAGE                  docker image (or repo) to be transferred
 
 optional arguments:
   --add-prefix PREFIX    prefix to be prepended to the image name

@@ -3,11 +3,10 @@
 # docker-ssh: push and pull docker images over ssh
 #
 # usage:
-#   docker-ssh pull [-h] [USER@]HOST[:PORT][:DOCKER_URL] IMAGE [IMAGE ...]
-#   docker-ssh push [-h] [USER@]HOST[:PORT][:DOCKER_URL] IMAGE [IMAGE ...]
+#   docker-ssh pull URL IMAGE [IMAGE ...]    
 #
-#   docker-ssh pull [-h] DOCKER_URL IMAGE [IMAGE ...]
-#   docker-ssh push [-h] DOCKER_URL IMAGE [IMAGE ...]
+#   docker-ssh push URL IMAGE [IMAGE ...]
+#   docker-ssh push URL [URL ...] . IMAGE [IMAGE ...]
 #
 # This script uses `docker save` `docker load` and a ssh session to transfer
 # images from/to a docker daemon running on a remote host.
@@ -17,8 +16,10 @@
 #
 
 import argparse
+import concurrent.futures
 import contextlib
 import io
+import itertools
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 
 PROG = "docker-ssh"
@@ -44,6 +46,17 @@ def log_exec(cmd):
 def check_output(cmd, *k, **kw):
     log_exec(cmd)
     return subprocess.check_output(cmd, *k, **kw)
+
+def os_read_all(fd):
+    lst = []
+    while True:
+        try:
+            data = os.read(fd, 65536)
+            if not data:
+                return b"".join(lst)
+            lst.append(data)
+        except InterruptedError:
+            pass
 
 @contextlib.contextmanager
 def process(cmd, *k, **kw):
@@ -62,6 +75,37 @@ def process(cmd, *k, **kw):
                 proc.kill()
             except OSError:
                 pass
+
+class KillerThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+    def __init__(self, *k):
+        super().__init__(*k)
+
+        self._lock  = threading.Lock()
+        self._procs = set()
+
+    def shutdown(self, wait=True):
+        with self._lock:
+            for p in self._procs:
+                if p.returncode is None:
+                    try:
+                        p.kill()
+                    except OSError:
+                        pass
+
+        return super().shutdown(wait)
+
+    @contextlib.contextmanager
+    def __call__(self, process_manager):
+        with self._lock, process_manager as proc:
+            assert isinstance(proc, subprocess.Popen)
+            self._procs.add(proc)
+            self._lock.release()
+            try:
+                yield proc
+            finally:
+                self._lock.acquire()
+                self._procs.remove(proc)
+
 
 class Pipe:
     def __init__(self, pv = False):
@@ -121,13 +165,17 @@ class Session:
 
         return process(self.cmd(cmd), stdout=stdout)
 
+    @contextlib.contextmanager
     def load(self, *, stdin=None, stdout=None, print_excludes=False):
 
         cmd = ["docker", "load"]
         if print_excludes:
             cmd.append("--print-excludes")
 
-        return process(self.cmd(cmd), stdin=stdin, stdout=stdout)
+        with process(self.cmd(cmd), stdin=stdin, stdout=stdout) as proc:
+            if stdout is subprocess.PIPE:
+                proc.result = lambda: proc.communicate()[0].decode().splitlines()
+            yield proc
 
     def tag(self, img, tag):
         check_output(self.cmd(["docker", "tag", "--", img, tag]))
@@ -192,6 +240,94 @@ class UrlSession(Session):
     def cmd(self, args=[]):
         return ["/usr/bin/env", "DOCKER_HOST=" + self.url] + args
 
+class MultiSession(Session):
+    def __init__(self, sessions):
+        self.sessions = list(sessions)
+        self._stack = contextlib.ExitStack()
+
+    def cmd(self, args=[]):
+        raise NotImplementedError()
+
+    def __enter__(self):
+        try:
+            for s in self.sessions:
+                self._stack.enter_context(s)
+        except:
+            self._stack.close()
+            raise
+
+    def __exit__(self, *exc_info):
+        self._stack.close()
+
+    def _executor(self):
+        return KillerThreadPoolExecutor(8)
+
+    def can_load_print_excludes(self):
+        with self._executor() as executor:
+            return all(executor.map(
+                lambda s: s.can_load_print_excludes(), self.sessions))
+
+    @contextlib.contextmanager
+    def load(self, *, stdin=None, stdout=None, print_excludes=False):
+
+        if not isinstance(stdin, int):
+            raise NotImplementedError()
+
+        if print_excludes:
+            with self._executor() as executor:
+
+                def pe_thread():
+
+                    def load_thread(session):
+                        with executor(session.load(print_excludes=True,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE)) as proc:
+                            proc.stdin.write(rawtar)
+                            exclude = proc.result()
+                            log.debug("(%s) exclude: %s", session.label, exclude)
+                            return exclude
+
+                    rawtar = os_read_all(fd)
+                    os.close(fd)
+
+                    exclude = None
+                    for ex in executor.map(load_thread, self.sessions):
+                        if exclude is None:
+                            exclude = set(ex)
+                        else:
+                            exclude.intersection_update(ex)
+                    
+                    return list(exclude or ())
+
+
+                fd = os.dup(stdin)
+                future_result = executor.submit(pe_thread)
+
+                class Proc:
+                    result = lambda: future_result.result()
+                yield Proc
+
+
+        else:
+            # not print_excludes
+            with contextlib.ExitStack() as stack:
+                tee_wr = []
+                for session in self.sessions:
+                    rd, wr = os.pipe()
+                    stack.enter_context(session.load(stdin=rd))
+                    os.close(rd)
+                    tee_wr.append(wr)
+
+                stack.enter_context(process(
+                        ["tee"] + ["/dev/fd/%d" % fd for fd in tee_wr[1:]],
+                        stdin=stdin, stdout=tee_wr[0], pass_fds=tee_wr))
+
+                for fd in tee_wr:
+                    os.close(fd)
+
+                yield
+
+
+
 
 def prepare_translation(src, images, add_pfx, rm_pfx):
 
@@ -248,7 +384,8 @@ def do_transfer(src, dst, images, add_pfx, rm_pfx):
                 src.save(images, exclude=["all"], stdout=pipe.wr),  \
                 dst.load(print_excludes=True,     stdin =pipe.rd, stdout=subprocess.PIPE) as proc:
             pipe.close()
-            exclude = proc.communicate()[0].decode().splitlines()
+            exclude = proc.result()
+            log.debug("(%s) exclude: %s", dst.label, exclude)
 
 
     with    Pipe(pv=True) as pipe,                                     \
@@ -263,15 +400,22 @@ def do_transfer(src, dst, images, add_pfx, rm_pfx):
 
 def create_session(url):
 
-    if re.match(r"[a-z]+://", url):
-        return UrlSession(url)
+    if url == "local:":
+        session = LocalSession()
 
-    mo = re.match(r"(?:([^:@/\s]+)@)?([^:@/\s]+)(?::([^:@/\s]+))?(?::([a-z]+://.*))?$", url, re.I)
-    if not mo:
-        die("remote host must match: [user@]host[:port][:docker_url] or docker_url")
+    elif re.match(r"[a-z]+://", url):
+        session = UrlSession(url)
 
-    user, host, port, url = mo.groups()
-    return SshSession(user, host, port, url)
+    else:
+        mo = re.match(r"(?:([^:@/\s]+)@)?([^:@/\s]+)(?::([^:@/\s]+))?(?::([a-z]+://.*))?$", url, re.I)
+        if not mo:
+            die("remote host must match: [user@]host[:port][:docker_url] or docker_url")
+
+        user, host, port, remote_url = mo.groups()
+        session = SshSession(user, host, port, remote_url)
+
+    session.label = url
+    return session
 
 def main():
     def loglevel(value):
@@ -288,17 +432,19 @@ def main():
     sub = parser.add_subparsers(dest="command", help="sub-command help")
 
     def add_push_pull_cmd(name, help):
+        extra = "" if name!="push" else  "\n\t%(prog)s URL [URL ...] . IMAGE [IMAGE ...]"
         p = sub.add_parser(name, help=help, usage=
-                "\n\t%(prog)s [USER@]HOST[:PORT][:DOCKER_URL] IMAGE [ IMAGE... ]"
-                "\n\t%(prog)s DOCKER_URL                      IMAGE [ IMAGE... ]")
+                "\n\t%(prog)s URL IMAGE [IMAGE ...]" + extra)
         p.add_argument("--add-prefix", default="", metavar="PREFIX",
                 help="prefix to be prepended to the image name (in the destination daemon)")
         p.add_argument("--remove-prefix", default="", metavar="PREFIX",
                 help="prefix to be removed from the image name (in the destination daemon)")
-        p.add_argument("remote", metavar="[USER@]HOST[:PORT][:DOCKER_URL]",
-                help="paramenters to connect to the remote docker daemon")
+        p.add_argument("remote", metavar="URL",
+                help="""url identifying the remote node: either a docker url:
+                unix://, tcp://, ... or a ssh account:
+                [USER@]HOST[:PORT][:DOCKER_URL]""")
         p.add_argument("images", metavar="IMAGE", nargs="+",
-                help="docker images to be transferred")
+                help="docker image (or repo) to be transferred")
     
     add_push_pull_cmd("push", help="push images to the remote host")
     add_push_pull_cmd("pull", help="pull images from the remote host")
@@ -311,8 +457,21 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    local  = LocalSession()
-    remote = create_session(args.remote)
+    local  = create_session("local:")
+
+    if "." not in args.images:
+        remote = create_session(args.remote)
+    else:
+        # multiple remotes
+        if args.command == "pull":
+            die("pull does not accept multiple remotes")
+        i = args.images.index(".")
+
+        remote = MultiSession(itertools.chain(
+            (create_session(args.remote),),
+            map(create_session, args.images[:i])))
+        remote.label = "multi:"
+        args.images[:i+1] = ()
 
     if args.command == "pull":
         src, dst = remote, local
