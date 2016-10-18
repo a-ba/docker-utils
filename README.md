@@ -99,7 +99,6 @@ usage:
     docker-rundev [-h] [-s SOURCE] [-t TARGET] [-c CACHE] [ -- DOCKER_OPTIONS ] IMAGE [ COMMAND ... ]
 
 optional arguments:
-  -h, --help            	show this help message and exit
   -s SOURCE, --source SOURCE	host path of the source dir (mounted as /source with an overlay)
   -t TARGET, --target TARGET	host path of the target dir (mounted as /target)
   -c CACHE, --cache CACHE       host path of the cache dir (mounted as /cache)
@@ -133,7 +132,7 @@ Unfortunately the native docker client does not provide a straightforward way to
 
 
 docker-nsenter
-----------
+--------------
 
 **Wrapper for nsenter that accepts a docker container as target**
 
@@ -141,7 +140,6 @@ docker-nsenter
 usage: docker-nsenter -t CONTAINER  &lt;nsenter args...&gt;
 
 optional arguments:
-  -h, --help            show this help message and exit
   -t CONTAINER, --target CONTAINER
                         target docker container
 </pre>
@@ -151,6 +149,29 @@ optional arguments:
 <pre>
 docker-nsenter -t mycontainer --net netstat -anp
 </pre>
+
+
+docker-flatten
+--------------
+
+**Flatten docker images**
+
+<pre>
+usage: docker-flatten [-h] [-t TAG] [--replace] [--backup SUFFIX]
+                      IMAGE [IMAGE ...]
+
+optional arguments:
+  -t TAG, --tag TAG  tag for the resulting image
+  --replace          replace the current tag
+  --backup SUFFIX    keep a tag on the previous image (with SUFFIX appended to
+                     the tag version)
+</pre>
+
+This command merges all layers from a given image into a single one.
+
+The implementation is based on `docker export` and `docker import`. Because
+this process implies creating a temporary container, the resulting image has
+slight differences with the original image (eg. /etc/hostname, ...)
 
 
 mininit
