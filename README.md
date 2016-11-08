@@ -54,7 +54,7 @@ optional arguments:
   --remove-prefix PREFIX prefix to be removed from the image name
   --local URL            use an arbitrary docker daemon instead of
                          the default local daemon
-
+  -i IDENTITY            path of the private key for ssh authentication
 </pre>
 
 

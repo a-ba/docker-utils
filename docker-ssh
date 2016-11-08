@@ -186,12 +186,13 @@ class LocalSession(Session):
         return list(args)
 
 class SshSession(Session):
-    def __init__(self, user, host, port, url):
+    def __init__(self, user, host, port, url, *, identity):
         self.user = user
         self.host = host
         self.port = port
         self.proc = None
         self.url  = url
+        self.identity = identity
 
     def cmd(self, args=[]):
         cmd = list(self.basecmd)
@@ -212,6 +213,8 @@ class SshSession(Session):
             self.basecmd.extend(["-l", self.user])
         if self.port:
             self.basecmd.extend(["-p", self.port])
+        if self.identity:
+            self.basecmd.extend(["-i", self.identity])
 
         cmd = self.basecmd + ["-MN", self.host]
         log_exec(cmd)
@@ -398,7 +401,7 @@ def do_transfer(src, dst, images, add_pfx, rm_pfx):
         dst.tag(img, tag)
 
 
-def create_session(url):
+def create_session(url, identity):
 
     if url == "local:":
         session = LocalSession()
@@ -412,7 +415,7 @@ def create_session(url):
             die("remote host must match: [user@]host[:port][:docker_url] or docker_url")
 
         user, host, port, remote_url = mo.groups()
-        session = SshSession(user, host, port, remote_url)
+        session = SshSession(user, host, port, remote_url, identity=identity)
 
     session.label = url
     return session
@@ -441,6 +444,8 @@ def main():
                 help="prefix to be removed from the image name (in the destination daemon)")
         p.add_argument("--local", metavar="URL", default="local:",
                 help="use an arbitrary docker daemon instead of the default local daemon")
+        p.add_argument("-i", "--identity",
+                help="select the private key used for ssh authentication")
         p.add_argument("remote", metavar="URL",
                 help="""url identifying the remote node: either a docker url:
                 unix://, tcp://, ... or a ssh account:
@@ -459,10 +464,12 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    local  = create_session(args.local)
+    mksession = lambda *k: create_session(*k, identity=args.identity)
+
+    local  = mksession(args.local)
 
     if "." not in args.images:
-        remote = create_session(args.remote)
+        remote = mksession(args.remote)
     else:
         # multiple remotes
         if args.command == "pull":
@@ -470,8 +477,8 @@ def main():
         i = args.images.index(".")
 
         remote = MultiSession(itertools.chain(
-            (create_session(args.remote),),
-            map(create_session, args.images[:i])))
+            (mksession(args.remote),),
+            map(mksession, args.images[:i])))
         remote.label = "multi:"
         args.images[:i+1] = ()
 
