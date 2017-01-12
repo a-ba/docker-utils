@@ -1,18 +1,23 @@
 #!/usr/bin/python3
 # vim:et:nosta:sw=4:sts=4:
 
-import argparse, difflib, subprocess, json, contextlib, signal, tempfile, os, sys
+import argparse, difflib, subprocess, json, contextlib, signal, tempfile, os, sys, io
 
 from subprocess import Popen, PIPE
 
-def run(cmd):
-#    sys.stderr.write("run %s\n" % " ".join(map(repr, cmd)))
-    proc = Popen(cmd, stdin=PIPE, stdout=PIPE,
-            preexec_fn = lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
-    out, _ = proc.communicate()
-    code = proc.wait()
+def default_run_error_handler(cmd, code, out, err):
+    sys.stderr.buffer.write(err)
+    raise subprocess.CalledProcessError(code, cmd)
 
-    assert not code
+def run(cmd, *, error_handler=default_run_error_handler):
+#    sys.stderr.write("run %s\n" % " ".join(map(repr, cmd)))
+    proc = Popen(cmd, stdin=PIPE, stdout=PIPE, stderr=PIPE,
+            preexec_fn = lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
+    out, err = proc.communicate()
+    code = proc.wait()
+    if code:
+        return error_handler(cmd, code, out, err)
+    sys.stderr.buffer.write(err)
     return out.decode().strip()
 
 def inspect(ctr):
@@ -87,9 +92,17 @@ with run_tmp_container(image) as tmpctr, \
             path = path.strip("/")
             assert bn, "must not be a directory"
             with defer_sigint:
-                # TODO: allow file creation
-                run(["docker", "cp", "%s:/%s" % (tmpctr, path), orig])
-                run(["docker", "cp", "%s:/%s" % (args.container, path), dest])
+                for cp_src, cp_dst in (
+                    ("%s:/%s" % (tmpctr,         path), orig),
+                    ("%s:/%s" % (args.container, path), dest)):
+
+                    def hnd(cmd, code, out, err):
+                        if b"no such file or directory" in err:
+                            with open(cp_dst, "wb"):
+                                pass
+                        else:
+                            default_run_error_handler(cmd, code, out, err)
+                    run(["docker", "cp", cp_src, cp_dst], error_handler=hnd)
             with    open(orig) as a, \
                     open(dest) as b:
                 print("".join(difflib.unified_diff(list(a), list(b), path, path)))
