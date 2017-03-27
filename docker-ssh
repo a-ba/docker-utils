@@ -174,7 +174,7 @@ class Session:
 
         with process(self.cmd(cmd), stdin=stdin, stdout=stdout) as proc:
             if stdout is subprocess.PIPE:
-                proc.result = lambda: proc.communicate()[0].decode().splitlines()
+                proc.result = lambda: proc.communicate()[0].decode().split()
             yield proc
 
     def tag(self, img, tag):
