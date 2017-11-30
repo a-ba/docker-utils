@@ -103,6 +103,6 @@ with run_tmp_container(image) as tmpctr, \
                         else:
                             default_run_error_handler(cmd, code, out, err)
                     run(["docker", "cp", cp_src, cp_dst], error_handler=hnd)
-            with    open(orig) as a, \
-                    open(dest) as b:
+            with    open(orig, errors="surrogateescape") as a, \
+                    open(dest, errors="surrogateescape") as b:
                 print("".join(difflib.unified_diff(list(a), list(b), path, path)))
