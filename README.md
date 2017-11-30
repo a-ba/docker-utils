@@ -32,7 +32,7 @@ The remote daemon is identified with a URL, which can be:
 
 The `push` command may work with multiple destinations (to deploy the same image to multiple nodes in one shot).
 
-If the sending daemon supports the [`--exclude`](https://github.com/docker/docker/pull/9304) option in `docker save` ([latest patch available here](https://github.com/a-ba/docker/tree/3870-partial-save)) this script automatically detects it and use it to avoid transmitting the layers that are already present in the receiving daemon (only the new layers are sent). Note that with multiple destinations, the resulting exclude list is the intersection of the lists given by all receiving daemons (all daemons receive the same data).
+If the sending daemon supports the [`--exclude`](https://github.com/docker/docker/pull/9304) option in `docker save` ([latest patch available here](https://github.com/a-ba/docker-ce/tree/aba/partial-save)) this script automatically detects it and use it to avoid transmitting the layers that are already present in the receiving daemon (only the new layers are sent). Note that with multiple destinations, the resulting exclude list is the intersection of the lists given by all receiving daemons (all daemons receive the same data).
 
 The command also allow translating image names (adding or removing a prefix). For example, with `docker push --add-prefix PFX/ HOST IMG` the resulting image in the remote daemon will be named `PFX/IMG`.
 
