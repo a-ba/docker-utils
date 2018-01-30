@@ -52,6 +52,7 @@ void print_help()
 	puts(	"usage: docker-sandbox [ OPTIONS ] COMMAND [ ARGS ... ]\n"
 		"options:\n"
 		"  -v VOLUME[:ro]  mount VOLUME as an external volume\n"
+		"  --network NET   use alternative network mode\n"
 		"  -i              keep stdin open\n"
 		"  -t              allocate tty\n"
 		"  -h              print help\n"
@@ -198,7 +199,7 @@ struct option long_options[] = {
 
 	{"help",	no_argument,		NULL,	'h'},
 	{"volume",	required_argument,	NULL,	'v'},
-	{"net",		required_argument,	NULL,	'N'},
+	{"network",	required_argument,	NULL,	'N'},
 
 	{"tty",		no_argument,		NULL,	0},
 	{"stdin",	no_argument,		NULL,	0},
@@ -335,7 +336,7 @@ int main(int argc, char* argv[])
 			break;
 		case 'N':
 			if (strcmp(optarg, "host") != 0) {
-				die("invalid network --net=%s (allowed value is 'host', default is 'none')", optarg);
+				die("invalid network --network=%s (allowed value is 'host', default is 'none')", optarg);
 			}
 			use_host_net = 1;
 			break;
@@ -349,9 +350,9 @@ int main(int argc, char* argv[])
 
 	// network
 	if (use_host_net) {
-		append(&cmd, "--net=host");
+		append(&cmd, "--network=host");
 	} else {
-		append(&cmd, "--net=none");
+		append(&cmd, "--network=none");
 	}
 
 	// workdir
