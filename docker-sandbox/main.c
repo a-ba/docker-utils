@@ -36,15 +36,25 @@ const char* DOCKER_CANDIDATES[] =
 	NULL
 };
 
+int endswith(const char* haystack, const char* needle)
+{
+	int lh = strlen(haystack);
+	int ln = strlen(needle);
+
+	int offset = lh - ln;
+	return (offset >= 0) &&
+		(strcmp(&haystack[offset], needle) == 0);
+}
+
 
 void print_help()
 {
 	puts(	"usage: docker-sandbox [ OPTIONS ] COMMAND [ ARGS ... ]\n"
 		"options:\n"
-		"  -v VOLUME	mount VOLUME as an external volume\n"
-		"  -i		keep stdin open\n"
-		"  -t		allocate tty\n"
-		"  -h		print help\n"
+		"  -v VOLUME[:ro]  mount VOLUME as an external volume\n"
+		"  -i              keep stdin open\n"
+		"  -t              allocate tty\n"
+		"  -h              print help\n"
 	);		
 }
 
@@ -88,6 +98,13 @@ void add_volume(struct list* cmd, const char* requested_path)
 
 	char path[PATH_MAX];
 
+	int read_only = endswith(requested_path, ":ro");
+	if(read_only)
+	{
+		int len = strlen(requested_path);
+		((char*)requested_path)[len-3] = '\0';
+	}
+
 	if (realpath(requested_path, path) == NULL)
 	{
 		warning("ignored volume '%s' (%s)", requested_path, strerror(errno));
@@ -99,8 +116,9 @@ void add_volume(struct list* cmd, const char* requested_path)
 		return;
 	}
 
-	char* arg = malloc(strlen(path)*2 + 2);
-	sprintf(arg, "%s:%s", path, path);
+	char* arg = malloc(strlen(path)*2 + 5);
+	sprintf(arg, "%s:%s%s", path, path,
+			(read_only ? ":ro" : ""));
 
 	append(cmd, "-v");
 	append(cmd, arg);
