@@ -108,13 +108,16 @@ def verify(old_image, new_image):
                 "\n\t%-20s old=%r new=%r" % d for d in differences))
 
 
-def make_todo(client, images, ignore_unknown):
+def make_todo(client, images, ignore_unknown, max_layers):
     # key: the image id
     # value: set of tags listed in the command line for this image
     todo = collections.defaultdict(set)
     for image in images:
         try:
             js = client.inspect_image(image)
+            assert js["RootFS"]["Type"] == "layers"
+            if len(js["RootFS"].get("Layers", ())) <= max_layers:
+                continue
         except docker.errors.NotFound:
             if ignore_unknown:
                 continue
@@ -165,6 +168,8 @@ def main():
             help = "keep a tag on the previous image (with SUFFIX appended to the tag version)")
     parser.add_argument("--ignore-unknown", action="store_true",
             help = "silently ignore unknown images listed in the command line")
+    parser.add_argument("--max-layers", metavar="NB", type=int, default=-1,
+            help = "silently ignore images with no more than NB layers")
 
     args = parser.parse_args()
     if args.tag and args.replace:
@@ -181,7 +186,7 @@ def main():
 
     client = docker.Client()
 
-    todo = make_todo(client, args.images, args.ignore_unknown)
+    todo = make_todo(client, args.images, args.ignore_unknown, args.max_layers)
 
     for old_id, old_tags in todo.items():
 

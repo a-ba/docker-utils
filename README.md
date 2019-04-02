@@ -166,6 +166,7 @@ optional arguments:
   --backup SUFFIX    keep a tag on the previous image (with SUFFIX appended to
                      the tag version)
   --ignore-unknown   silently ignore unknown images listed in the command line
+  --max-layers NB    silently ignore images with no more than NB layers
 </pre>
 
 This command merges all layers from a given image into a single one.
