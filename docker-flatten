@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
 import argparse
+import collections
 import contextlib
 import re
 import subprocess
@@ -36,12 +37,12 @@ def remove(image):
         sys.stderr.write("warning: unable to remove image %s (%s)\n" % (
             image, e.explanation.decode()))
 
-def flatten(image, tag = None):
+def flatten(image, old_tags):
     info = client.inspect_image(image)
 
     orig = image
-    if tag:
-        orig += " (%s)" % tag
+    if old_tags:
+        orig += " (%s)" % (" ".join(sorted(old_tags)))
 
     proc1 = proc2 = None
     base_image = commit_image = new_image = None
@@ -107,6 +108,42 @@ def verify(old_image, new_image):
                 "\n\t%-20s old=%r new=%r" % d for d in differences))
 
 
+def make_todo(client, images):
+    # key: the image id
+    # value: set of tags listed in the command line for this image
+    todo = collections.defaultdict(set)
+    for image in images:
+        try:
+            js = client.inspect_image(image)
+        except docker.errors.NotFound:
+            raise
+
+        tags = todo[js["Id"]]
+
+        # if 'image' is a tag (not an image id) then add it to the set
+        for tag in image, (image+":latest"):
+            if tag in js.get("RepoTags", ()):
+                tags.add(tag)
+                break
+    return todo
+
+def make_backup_tag_list(client, old_tags, suffix):
+    assert suffix and ":" not in suffix and "/" not in suffix
+    assert all(re.search(r":[^/:]+\Z", tag) for tag in old_tags)
+    result = [tag+suffix for tag in old_tags]
+
+    # abort if any backup tag already exists
+    errors = []
+    for tag in result:
+        try:
+            client.inspect_image(tag)
+            errors.append(tag)
+        except docker.errors.NotFound:
+            pass
+    if errors:
+        die("backup image(s) already present: %s" % (" ".join(errors)))
+    return result
+
 def main():
     global client
 
@@ -140,42 +177,28 @@ def main():
 
     client = docker.Client()
 
-    for image in args.images:
+    todo = make_todo(client, args.images)
 
-        js = client.inspect_image(image)
-        old_id = js["Id"]
+    for old_id, old_tags in todo.items():
 
-        # if image is a tag then set old_tag to this tag
-        for old_tag in image, (image+":latest"):
-            if old_tag in js.get("RepoTags", ()):
-                break
-        else:
-            old_tag = None
-
-        backup_tag = None
+        backup_tags = []
         if args.replace:
-            if old_tag is None:
+            if not old_tags:
                 die("error: cannot flatten %s (--replace must be used with a tag)\n" % image)
-            new_tag = old_tag
+            new_tags = list(old_tags)
             if args.backup:
-                assert ":" in old_tag
-                backup_tag = old_tag + args.backup
-                try:
-                    client.inspect_image(backup_tag)
-                    die("there is an existing image with tag %r" % backup_tag)
-                except docker.errors.NotFound:
-                    pass
+                backup_tags += make_backup_tag_list(client, old_tags, args.backup)
         else:
-            new_tag = args.tag
+            new_tags = [args.tag]
 
         new_id = None
         try:
-            new_id = flatten(old_id, old_tag)
+            new_id = flatten(old_id, old_tags)
             verify(old_id, new_id)
             print(new_id)
-            if backup_tag:
+            for backup_tag in backup_tags:
                 client.tag(old_id, *split_repotag(backup_tag))
-            if new_tag:
+            for new_tag in new_tags:
                 client.tag(new_id, *split_repotag(new_tag))
         except:
             if new_id:
