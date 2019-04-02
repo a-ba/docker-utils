@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# TODO: test if security opt is available (to support VNC)
+# TODO: test if pulseaudio is present (fails if not present)
+
 die()
 {
 	cat >&2 <<EOF
