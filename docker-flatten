@@ -155,7 +155,7 @@ def main():
         backup_tag = None
         if args.replace:
             if old_tag is None:
-                die("error: cannot flatten %s (-u must be used with a tag)\n" % image)
+                die("error: cannot flatten %s (--replace must be used with a tag)\n" % image)
             new_tag = old_tag
             if args.backup:
                 assert ":" in old_tag
