@@ -165,6 +165,7 @@ optional arguments:
   --replace          replace the current tag
   --backup SUFFIX    keep a tag on the previous image (with SUFFIX appended to
                      the tag version)
+  --ignore-unknown   silently ignore unknown images listed in the command line
 </pre>
 
 This command merges all layers from a given image into a single one.

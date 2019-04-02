@@ -108,7 +108,7 @@ def verify(old_image, new_image):
                 "\n\t%-20s old=%r new=%r" % d for d in differences))
 
 
-def make_todo(client, images):
+def make_todo(client, images, ignore_unknown):
     # key: the image id
     # value: set of tags listed in the command line for this image
     todo = collections.defaultdict(set)
@@ -116,6 +116,8 @@ def make_todo(client, images):
         try:
             js = client.inspect_image(image)
         except docker.errors.NotFound:
+            if ignore_unknown:
+                continue
             raise
 
         tags = todo[js["Id"]]
@@ -161,6 +163,8 @@ def main():
             help = "replace the current tag")
     parser.add_argument("--backup", metavar="SUFFIX",
             help = "keep a tag on the previous image (with SUFFIX appended to the tag version)")
+    parser.add_argument("--ignore-unknown", action="store_true",
+            help = "silently ignore unknown images listed in the command line")
 
     args = parser.parse_args()
     if args.tag and args.replace:
@@ -177,7 +181,7 @@ def main():
 
     client = docker.Client()
 
-    todo = make_todo(client, args.images)
+    todo = make_todo(client, args.images, args.ignore_unknown)
 
     for old_id, old_tags in todo.items():
 
