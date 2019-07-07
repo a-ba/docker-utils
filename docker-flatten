@@ -184,7 +184,7 @@ def main():
     if args.tag and not re.search(r":[^/]+\Z", args.tag):
         args.tag += ":latest"
 
-    client = docker.Client()
+    client = docker.APIClient()
 
     todo = make_todo(client, args.images, args.ignore_unknown, args.max_layers)
 
