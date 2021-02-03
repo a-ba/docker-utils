@@ -217,3 +217,33 @@ This is an alias for:
 <pre>
     docker images --no-trunc -q -f dangling=true | xargs docker rmi
 </pre>
+
+
+docker-upgrade
+--------------
+
+**Upgrade docker images**
+
+<pre>
+usage: docker-upgrade [-h] [-f] [--ignore-unknown] [--http-proxy URL] [-q]
+                      [-v]
+                      IMAGE [IMAGE ...]
+
+positional arguments:
+  IMAGE             image name (with wildcard expansion)
+
+optional arguments:
+  -h, --help        show this help message and exit
+  -f, --force       force committing a new image even if there is no reported
+                    upgrades
+  --ignore-unknown  silently ignore unknown images listed in the command line
+  --http-proxy URL  value for the `http_proxy` environment variable to be set
+                    in the upgrade container
+  -q, --quiet       decrease verbosity
+  -v, --verbose     increase verbosity
+</pre>
+
+This command is intended for security upgrades. For each image, it runs a
+container and attempts to perform a system upgrade. If the upgrade is
+effective, then a new image is committed, replacing the old one. It supports
+distributions based on debian (apt), alpine (apk) and redhat (yum/dnf).

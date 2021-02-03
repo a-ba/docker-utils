@@ -1,0 +1,191 @@
+#!/usr/bin/python3
+
+import argparse
+import collections
+import logging
+import shlex
+import sys
+import time
+from   typing import List, Optional
+
+import docker
+from   docker.errors import APIError, NotFound
+
+import pkg_resources
+
+log = logging.getLogger("docker-upgrade")
+
+def fmt_image_id(image_id: str):
+    return image_id.strip("sha256:")[:12]
+
+def fmt_image(image_id: str, tags: List[str]):
+    short_id = fmt_image_id(image_id)
+    return f"{short_id} [{' '.join(tags)}]" if tags else short_id
+
+def load_upgrade_script() -> bytes:
+    
+    path = pkg_resources.resource_filename("docker_utils_aba", "docker-upgrade-script.sh")
+
+    with open(path, "rb") as fp:
+        return fp.read()
+
+def write_to_stdin(client: docker.APIClient, container_id: str, data: bytes):
+    sock = client.attach_socket(container_id, dict(stdin=True, stream=True))
+    offset = 0
+    while True:
+        chunk = data[offset:]
+        if not chunk:
+            sock.close()
+            return
+        offset += sock._sock.send(chunk)
+
+
+def do_upgrade(client: docker.APIClient, image_id: str, tags: List[str], *, force: bool = False,
+        script: bytes):
+
+    desc = fmt_image(image_id, tags)
+
+    cid = None
+    try:
+        # get the current config of the image
+        orig_config = client.inspect_image(image_id)["Config"]
+
+        # create and start the temporary container
+        cid = client.create_container(image=image_id, user="0:0", entrypoint=[],
+                command=["/bin/sh"], stdin_open=True)["Id"]
+        client.start(cid)
+
+        # write the script to stdin
+        write_to_stdin(client, cid, script)
+
+        # wait until the script terminates
+        returncode = client.wait(cid)["StatusCode"]
+
+        # get the output
+        output = client.logs(cid)
+
+        os_supported = not (returncode==96 and b"OS_NOT_SUPPORTED" in output)
+
+        # dump the container output on:
+        #   -vv (always)
+        #   -v  (except for os_not_supported errors)
+        l = log.getEffectiveLevel()
+        if (l <= logging.DEBUG) or (os_supported and l < logging.INFO):
+            for line in output.decode(errors="replace").splitlines():
+                if line:
+                    log.info("output: %s", line)
+
+        if returncode:
+            if not os_supported:
+                log.error("failed to upgrade %s (os not supported)", desc)
+            else:
+                log.error("failed to upgrade %s (exit %s)", desc, returncode)
+
+        elif not output and not force:
+            log.info("image not upgraded: %s", desc)
+        else:
+            # commit the image
+            log.debug("committing new image for %s", desc)
+            new_id = client.commit(cid,
+                conf = orig_config,
+                message = "automatic upgrade, %s" % time.ctime(),
+            )["Id"]
+
+            # update the tags
+            for tag in tags:
+                repo, tag = docker.utils.parse_repository_tag(tag)
+                assert tag is not None
+                client.tag(image=new_id, repository=repo, tag=tag, force=True)
+
+            log.info("image upgraded %s -> %s", desc, fmt_image_id(new_id))
+
+    except APIError as e:
+        log.error("failed to upgrade %s (%s)", desc, e)
+    finally:
+        if cid is not None:
+            try:
+                client.remove_container(cid, v=True, force=True)
+            except APIError as e:
+                log.warning("failed to remove temporary container %s (%s)", cid, e)
+
+
+def expand_tag(image: str) -> str:
+    """parse an image name and append a ':latest' if the image does not have any tag"""
+
+    repo, tag = docker.utils.parse_repository_tag(image)
+
+    return f"{repo}:{'latest' if tag is None else tag}"
+
+
+def main():
+    parser = argparse.ArgumentParser(description="upgrade docker images",
+            epilog="""This command is intended for security upgrades. For each image, it runs a
+            container and attempts to perform a system upgrade. If the upgrade is effective, then a
+            new image is committed, replacing the old one. It supports distributions based on debian
+            (apt), alpine (apk) and redhat (yum/dnf).""")
+
+    parser.add_argument("images", metavar="IMAGE", nargs="+",
+            help="image name (with wildcard expansion)")
+    parser.add_argument("-f", "--force", action="store_true",
+            help="force committing a new image even if there is no reported upgrades")
+    parser.add_argument("--ignore-unknown", action="store_true",
+            help = "silently ignore unknown images listed in the command line")
+    parser.add_argument("--http-proxy", metavar="URL",
+            help="""value for the `http_proxy` environment variable to be set in the upgrade
+            container""")
+    parser.add_argument("-q", "--quiet",   action="store_true", help="decrease verbosity")
+    parser.add_argument("-v", "--verbose", action="count", default=0,
+            help="increase verbosity")
+
+    args = parser.parse_args()
+    log_level = (
+            logging.DEBUG   if args.verbose >  1 else
+            logging.INFO-1  if args.verbose == 1 else
+            logging.INFO    if not args.quiet    else
+            logging.WARNING)
+
+    logging.basicConfig(level=log_level)
+    
+    have_error = False
+    client = docker.APIClient()
+
+    # prepare the list of images to be upgraded
+
+    # key:    image id
+    # values: tags
+    images : Dict[str, List[str]] = collections.defaultdict(list)
+    for image in args.images:
+        expected_repo_tag = expand_tag(image)
+        try:
+            img = client.inspect_image(image)
+        except docker.errors.APIError as e:
+            if args.ignore_unknown and isinstance(e, NotFound):
+                log.debug("skipping unknown image %r", image)
+            else:
+                log.error("failed to inspect image %r (%s)", image, e)
+                have_error = True
+            continue
+
+        lst = images[img["Id"]]
+        if expected_repo_tag in img["RepoTags"] and expected_repo_tag not in lst:
+            lst.append(expected_repo_tag)
+    try:
+        script = load_upgrade_script()
+        log.debug("upgrade script loaded (%d bytes)", len(script))
+        if args.http_proxy is not None:
+            log.info("using http_proxy: %s", args.http_proxy)
+            script = f"export http_proxy={shlex.quote(args.http_proxy)}\n".encode() + script
+    except Exception as e:
+        log.error("failed to load the upgrade script (%s)", e)
+        have_error = True
+    if have_error:
+        return 1
+
+    for image_id, tags in sorted(images.items(),
+            # order by first tag (and put all untagged images unsorted at the end)
+            key=lambda x: x[1][0] if x[1] else "~"):
+        log.debug("upgrading %s", fmt_image(image_id, tags))
+
+        do_upgrade(client, image_id, tags, force=args.force, script=script)
+
+sys.exit(main())

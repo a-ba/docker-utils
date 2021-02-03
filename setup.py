@@ -17,10 +17,12 @@ setup(
         docker-rundev
         docker-runx
         docker-ssh
+        docker-upgrade
     """.split(),
 
     packages    = ["docker_utils_aba"],
     package_data = {"docker_utils_aba": """
         docker-rundev-seccomp.json
+        docker-upgrade-script.sh
     """.split()},
 )
