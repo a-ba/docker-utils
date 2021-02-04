@@ -5,7 +5,7 @@ This repository provides a set of useful commands for docker users.
 
 **License:** GNU General Public Licence 3+
 
-**Copyright:** University of Rennes 1 (2016)
+**Copyright:** University of Rennes 1 (2016-2021)
 
 
 --------------------------------------------------------------------------------------
