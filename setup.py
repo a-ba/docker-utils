@@ -7,7 +7,7 @@ assert sys.version_info[0] > 2, "python2 not supported"
 
 setup(
     name        = "docker-utils-aba",
-    version     = "0.0.15",
+    version     = "0.0.16",
     scripts     = """
         docker-diff
         docker-flatten
