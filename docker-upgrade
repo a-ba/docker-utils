@@ -57,6 +57,9 @@ def do_upgrade(client: docker.APIClient, image_id: str, tags: List[str], *, forc
     cid = None
     fifo = None
     try:
+        if log.getEffectiveLevel() < logging.INFO:
+            log.info("============== upgrading %s ==============", desc)
+
         # create the fifo and open it for reading
         fifo = make_fifo(fifo_path)
 
@@ -87,8 +90,7 @@ def do_upgrade(client: docker.APIClient, image_id: str, tags: List[str], *, forc
         # dump the container output on:
         #   -vv (always)
         #   -v  (except for os_not_supported errors)
-        l = log.getEffectiveLevel()
-        if (l <= logging.DEBUG) or (os_supported and l < logging.INFO):
+        if log.getEffectiveLevel() < logging.INFO:
             for line in output.decode(errors="replace").splitlines():
                 if line:
                     log.info("output: %s", line)
@@ -205,7 +207,6 @@ def main():
         for image_id, tags in sorted(images.items(),
                 # order by first tag (and put all untagged images unsorted at the end)
                 key=lambda x: x[1][0] if x[1] else "~"):
-            log.debug("upgrading %s", fmt_image(image_id, tags))
 
             do_upgrade(client, image_id, tags, force=args.force, script=script, tmp_dir=tmp_dir)
 
