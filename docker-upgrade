@@ -3,10 +3,12 @@
 import argparse
 import collections
 import logging
+import os
 import shlex
 import sys
+import tempfile
 import time
-from   typing import List, Optional
+from   typing import BinaryIO, List, Optional
 
 import docker
 from   docker.errors import APIError, NotFound
@@ -39,20 +41,33 @@ def write_to_stdin(client: docker.APIClient, container_id: str, data: bytes):
             return
         offset += sock._sock.send(chunk)
 
+def make_fifo(path: str) -> BinaryIO:
+    """Create a fifo at the given path and open it in non-blocking mode"""
+
+    os.mkfifo(path, mode=0o600)
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    return os.fdopen(fd, "rb")
 
 def do_upgrade(client: docker.APIClient, image_id: str, tags: List[str], *, force: bool = False,
-        script: bytes):
+        script: bytes, tmp_dir: str):
 
     desc = fmt_image(image_id, tags)
 
+    fifo_path = os.path.join(tmp_dir, image_id.replace(":", "_"))
     cid = None
+    fifo = None
     try:
+        # create the fifo and open it for reading
+        fifo = make_fifo(fifo_path)
+
         # get the current config of the image
         orig_config = client.inspect_image(image_id)["Config"]
 
         # create and start the temporary container
         cid = client.create_container(image=image_id, user="0:0", entrypoint=[],
-                command=["/bin/sh"], stdin_open=True)["Id"]
+                command=["/bin/sh"], stdin_open=True, host_config=client.create_host_config(
+                    binds={fifo_path: {"bind": "/.docker-upgrade-fifo", "mode": "rw"}}
+                ))["Id"]
         client.start(cid)
 
         # write the script to stdin
@@ -61,10 +76,13 @@ def do_upgrade(client: docker.APIClient, image_id: str, tags: List[str], *, forc
         # wait until the script terminates
         returncode = client.wait(cid)["StatusCode"]
 
+        # get the status line from the fifo
+        status = fifo.read().strip().decode(errors="replace")
+
         # get the output
         output = client.logs(cid)
 
-        os_supported = not (returncode==96 and b"OS_NOT_SUPPORTED" in output)
+        os_supported = status != "not_supported"
 
         # dump the container output on:
         #   -vv (always)
@@ -79,10 +97,10 @@ def do_upgrade(client: docker.APIClient, image_id: str, tags: List[str], *, forc
             if not os_supported:
                 log.error("failed to upgrade %s (os not supported)", desc)
             else:
-                log.error("failed to upgrade %s (exit %s)", desc, returncode)
+                log.error("failed to upgrade %s (%s, exit %s)", desc, status, returncode)
 
         elif not output and not force:
-            log.info("image not upgraded: %s", desc)
+            log.info("image not upgraded: %s (%s)", desc, status)
         else:
             # commit the image
             log.debug("committing new image for %s", desc)
@@ -97,7 +115,7 @@ def do_upgrade(client: docker.APIClient, image_id: str, tags: List[str], *, forc
                 assert tag is not None
                 client.tag(image=new_id, repository=repo, tag=tag, force=True)
 
-            log.info("image upgraded %s -> %s", desc, fmt_image_id(new_id))
+            log.info("image upgraded %s -> %s (%s)", desc, fmt_image_id(new_id), status)
 
     except APIError as e:
         log.error("failed to upgrade %s (%s)", desc, e)
@@ -107,6 +125,8 @@ def do_upgrade(client: docker.APIClient, image_id: str, tags: List[str], *, forc
                 client.remove_container(cid, v=True, force=True)
             except APIError as e:
                 log.warning("failed to remove temporary container %s (%s)", cid, e)
+        if fifo is not None:
+            fifo.close()
 
 
 def expand_tag(image: str) -> str:
@@ -181,11 +201,12 @@ def main():
     if have_error:
         return 1
 
-    for image_id, tags in sorted(images.items(),
-            # order by first tag (and put all untagged images unsorted at the end)
-            key=lambda x: x[1][0] if x[1] else "~"):
-        log.debug("upgrading %s", fmt_image(image_id, tags))
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        for image_id, tags in sorted(images.items(),
+                # order by first tag (and put all untagged images unsorted at the end)
+                key=lambda x: x[1][0] if x[1] else "~"):
+            log.debug("upgrading %s", fmt_image(image_id, tags))
 
-        do_upgrade(client, image_id, tags, force=args.force, script=script)
+            do_upgrade(client, image_id, tags, force=args.force, script=script, tmp_dir=tmp_dir)
 
 sys.exit(main())

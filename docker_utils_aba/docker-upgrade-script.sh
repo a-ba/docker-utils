@@ -3,12 +3,24 @@
 set -e
 #set -x
 
+FIFO="/.docker-upgrade-fifo"
+
+log_fifo()
+{
+    if [ -p "$FIFO" ] ; then
+        cat >"$FIFO" <<EOF || true
+$*
+EOF
+    fi
+}
+
 try_legacy_upgrade_script()
 {
     done=
     for file in /dk/image_upgrade_root /dk/image_upgrade
     do
         if [ -f "$file" ] ; then
+            [ -n "$done" ] || log_fifo "legacy"
             done=1
             "$file"
         fi
@@ -22,6 +34,8 @@ try_debian_upgrade()
 {
     if [ -f /etc/debian_version ]
     then
+        log_fifo "debian"
+
         apt-get -qq -y --no-install-recommends update
         apt-get -qq -y --no-install-recommends upgrade --show-upgraded
         apt-get -qq -y clean
@@ -33,6 +47,8 @@ try_alpine_upgrade()
 {
     if [ -f /etc/alpine-release ]
     then
+        log_fifo "alpine"
+
         set +e
         date="`date`"
         out="`apk upgrade -U 2>&1`"
@@ -64,6 +80,8 @@ try_redhat_upgrade()
 {
     if [ -f /etc/redhat-release ]
     then
+        log_fifo "redhat"
+
         set +e
         out="`yum update -y 2>&1`"
         code=$?
@@ -90,8 +108,9 @@ EOF
 
 not_supported()
 {
-    echo "OS_NOT_SUPPORTED"
-    exit 96
+    log_fifo "not_supported"
+    echo "error: operating system not supported by docker-upgrade"
+    exit 1
 }
 
 (
