@@ -82,8 +82,19 @@ try_redhat_upgrade()
     then
         log_fifo "redhat"
 
+	candidates="dnf microdnf yum"
+	for cmd in $candidates . ; do
+		if [ "$cmd" = . ] ; then
+			echo "error: none of these commandes were found: $candidates" >&2
+			exit 1
+		fi
+		if which "$cmd" >/dev/null 2>&1 ; then
+			break
+		fi
+	done
+
         set +e
-        out="`yum update -y 2>&1`"
+        out="`"$cmd" update -y 2>&1`"
         code=$?
         if [ "$code" -ne 0 ]
         then
