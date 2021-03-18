@@ -88,7 +88,7 @@ try_redhat_upgrade()
 			echo "error: none of these commandes were found: $candidates" >&2
 			exit 1
 		fi
-		if which "$cmd" >/dev/null 2>&1 ; then
+		if type "$cmd" >/dev/null 2>&1 ; then
 			break
 		fi
 	done
