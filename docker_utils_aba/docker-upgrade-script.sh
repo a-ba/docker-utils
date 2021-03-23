@@ -36,6 +36,7 @@ try_debian_upgrade()
     then
         log_fifo "debian"
 
+        export DEBIAN_FRONTEND=noninteractive
         apt-get -qq -y --no-install-recommends update
         apt-get -qq -y --no-install-recommends upgrade --show-upgraded
         apt-get -qq -y clean
