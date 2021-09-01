@@ -197,8 +197,10 @@ def main():
             new_tags = list(old_tags)
             if args.backup:
                 backup_tags += make_backup_tag_list(client, old_tags, args.backup)
-        else:
+        elif args.tag is not None:
             new_tags = [args.tag]
+        else:
+            new_tags = []
 
         new_id = None
         try:
