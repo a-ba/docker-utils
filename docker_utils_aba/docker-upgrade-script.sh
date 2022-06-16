@@ -37,7 +37,13 @@ try_debian_upgrade()
         log_fifo "debian"
 
         export DEBIAN_FRONTEND=noninteractive
-        apt-get -qq -y --no-install-recommends update --allow-releaseinfo-change-suite
+
+        if apt-get update --allow-releaseinfo-change --ERROR  2>&1 | grep -q allow-releaseinfo-change ; then
+                apt-get -qq -y update
+        else
+                apt-get -qq -y update --allow-releaseinfo-change-suite
+        fi
+
         apt-get -qq -y --no-install-recommends upgrade --show-upgraded
         apt-get -qq -y clean
         exit 0
