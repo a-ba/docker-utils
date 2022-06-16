@@ -67,8 +67,12 @@ def do_upgrade(client: docker.APIClient, image_id: str, tags: List[str], *, forc
         orig_config = client.inspect_image(image_id)["Config"]
 
         # create and start the temporary container
+        cmd = ["/bin/sh"]
+        if log.getEffectiveLevel() <= logging.DEBUG:
+            # trace shell commands with -vv
+            cmd.append("-x")
         cid = client.create_container(image=image_id, user="0:0", entrypoint=[],
-                command=["/bin/sh"], stdin_open=True, host_config=client.create_host_config(
+                command=cmd, stdin_open=True, host_config=client.create_host_config(
                     binds={fifo_path: {"bind": "/.docker-upgrade-fifo", "mode": "rw"}}
                 ))["Id"]
         client.start(cid)
