@@ -225,8 +225,8 @@ docker-upgrade
 **Upgrade docker images**
 
 <pre>
-usage: docker-upgrade [-h] [-f] [--ignore-unknown] [--http-proxy URL] [-q]
-                      [-v]
+usage: docker-upgrade [-h] [-f] [--ignore-unknown]
+                      [--http-proxy URL | --squid] [-q] [-v]
                       IMAGE [IMAGE ...]
 
 positional arguments:
