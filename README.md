@@ -239,6 +239,8 @@ optional arguments:
   --ignore-unknown  silently ignore unknown images listed in the command line
   --http-proxy URL  value for the `http_proxy` environment variable to be set
                     in the upgrade container
+  --squid           launch a squid container in the background to act as a
+                    HTTP proxy
   -q, --quiet       decrease verbosity
   -v, --verbose     increase verbosity
 </pre>

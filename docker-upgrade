@@ -2,9 +2,12 @@
 
 import argparse
 import collections
+import contextlib
 import logging
 import os
 import shlex
+import signal
+import socket
 import sys
 import tempfile
 import time
@@ -16,6 +19,49 @@ from   docker.errors import APIError, NotFound
 import pkg_resources
 
 log = logging.getLogger("docker-upgrade")
+
+SQUID_CONTAINER    = "docker-upgrade-squid"
+SQUID_SPOOL_VOLUME = "docker-upgrade-squid-spool"
+SQUID_LOG_VOLUME   = "docker-upgrade-squid-log"
+
+@contextlib.contextmanager
+def run_squid_container():
+    client = docker.DockerClient()
+    try:
+        log.info("starting squid container")
+        spool_volume = client.volumes.create(SQUID_SPOOL_VOLUME)
+        log_volume   = client.volumes.create(SQUID_LOG_VOLUME)
+        container = client.containers.run("ubuntu/squid:edge",
+                name = SQUID_CONTAINER,
+                detach = True,
+                mounts = [
+                    docker.types.Mount(target="/var/spool/squid", source=SQUID_SPOOL_VOLUME),
+                    docker.types.Mount(target="/var/log/squid", source=SQUID_LOG_VOLUME),
+                    ])
+        container.reload()
+        ip = container.attrs["NetworkSettings"]["Networks"]["bridge"]["IPAddress"]
+        for _ in range(50):
+            with contextlib.suppress(ConnectionRefusedError):
+                socket.create_connection((ip, 3128))
+                break
+            time.sleep(.1)
+        else:
+            raise RuntimeError("unable to connect to squid port 3128")
+        yield container.id
+    finally:
+        signal.signal(signal.SIGINT, lambda *k: print("SIGINT"))
+        log.info("stopping squid container")
+        for func in (
+                lambda: container.remove(force=True),
+                lambda: spool_volume.remove(),
+                lambda: log_volume.remove(),
+                ):
+            try:
+                func()
+            except UnboundLocalError:
+                pass
+            except Exception:
+                log.exception("squid cleanup error")
 
 def fmt_image_id(image_id: str):
     return image_id.strip("sha256:")[:12]
@@ -49,7 +95,7 @@ def make_fifo(path: str) -> BinaryIO:
     return os.fdopen(fd, "rb")
 
 def do_upgrade(client: docker.APIClient, image_id: str, tags: list[str], *, force: bool = False,
-        script: bytes, tmp_dir: str):
+        script: bytes, tmp_dir: str, squid_container: Optional[str]):
 
     desc = fmt_image(image_id, tags)
 
@@ -73,7 +119,9 @@ def do_upgrade(client: docker.APIClient, image_id: str, tags: list[str], *, forc
             cmd.append("-x")
         cid = client.create_container(image=image_id, user="0:0", entrypoint=[],
                 command=cmd, stdin_open=True, host_config=client.create_host_config(
-                    binds={fifo_path: {"bind": "/.docker-upgrade-fifo", "mode": "rw"}}
+                    binds={fifo_path: {"bind": "/.docker-upgrade-fifo", "mode": "rw"}},
+                    network_mode=("bridge" if squid_container is None
+                        else f"container:{squid_container}"),
                 ))["Id"]
         client.start(cid)
 
@@ -156,9 +204,14 @@ def main():
             help="force committing a new image even if there is no reported upgrades")
     parser.add_argument("--ignore-unknown", action="store_true",
             help = "silently ignore unknown images listed in the command line")
-    parser.add_argument("--http-proxy", metavar="URL",
+
+    proxy_group = parser.add_mutually_exclusive_group()
+    proxy_group.add_argument("--http-proxy", metavar="URL",
             help="""value for the `http_proxy` environment variable to be set in the upgrade
             container""")
+    proxy_group.add_argument("--squid", action="store_true",
+            help="""launch a squid container in the background to act as a HTTP proxy""")
+
     parser.add_argument("-q", "--quiet",   action="store_true", help="decrease verbosity")
     parser.add_argument("-v", "--verbose", action="count", default=0,
             help="increase verbosity")
@@ -195,23 +248,29 @@ def main():
         lst = images[img["Id"]]
         if expected_repo_tag in img["RepoTags"] and expected_repo_tag not in lst:
             lst.append(expected_repo_tag)
+
+    http_proxy = f"http://127.0.0.1:3128/" if args.squid else args.http_proxy
     try:
         script = load_upgrade_script()
         log.debug("upgrade script loaded (%d bytes)", len(script))
-        if args.http_proxy is not None:
-            log.info("using http_proxy: %s", args.http_proxy)
-            script = f"export http_proxy={shlex.quote(args.http_proxy)}\n".encode() + script
+        if http_proxy is not None:
+            log.info("using http_proxy: %s", http_proxy)
+            script = f"export http_proxy={shlex.quote(http_proxy)}\n".encode() + script
     except Exception as e:
         log.error("failed to load the upgrade script (%s)", e)
         have_error = True
     if have_error:
         return 1
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
+    with contextlib.ExitStack() as stack:
+        tmp_dir = stack.enter_context(tempfile.TemporaryDirectory())
+        squid_container = stack.enter_context(run_squid_container()) if args.squid else None
+
         for image_id, tags in sorted(images.items(),
                 # order by first tag (and put all untagged images unsorted at the end)
                 key=lambda x: x[1][0] if x[1] else "~"):
 
-            do_upgrade(client, image_id, tags, force=args.force, script=script, tmp_dir=tmp_dir)
+            do_upgrade(client, image_id, tags, force=args.force, script=script, tmp_dir=tmp_dir,
+                    squid_container=squid_container)
 
 sys.exit(main())
