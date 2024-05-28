@@ -8,7 +8,7 @@ import shlex
 import sys
 import tempfile
 import time
-from   typing import BinaryIO, List, Optional
+from   typing import BinaryIO, Optional
 
 import docker
 from   docker.errors import APIError, NotFound
@@ -20,7 +20,7 @@ log = logging.getLogger("docker-upgrade")
 def fmt_image_id(image_id: str):
     return image_id.strip("sha256:")[:12]
 
-def fmt_image(image_id: str, tags: List[str]):
+def fmt_image(image_id: str, tags: list[str]):
     short_id = fmt_image_id(image_id)
     return f"{short_id} [{' '.join(tags)}]" if tags else short_id
 
@@ -48,7 +48,7 @@ def make_fifo(path: str) -> BinaryIO:
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     return os.fdopen(fd, "rb")
 
-def do_upgrade(client: docker.APIClient, image_id: str, tags: List[str], *, force: bool = False,
+def do_upgrade(client: docker.APIClient, image_id: str, tags: list[str], *, force: bool = False,
         script: bytes, tmp_dir: str):
 
     desc = fmt_image(image_id, tags)
@@ -179,7 +179,7 @@ def main():
 
     # key:    image id
     # values: tags
-    images : Dict[str, List[str]] = collections.defaultdict(list)
+    images : dict[str, list[str]] = collections.defaultdict(list)
     for image in args.images:
         expected_repo_tag = expand_tag(image)
         try:
