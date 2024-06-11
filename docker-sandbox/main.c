@@ -118,7 +118,10 @@ void add_volume(struct list* cmd, const char* requested_path)
 	}
 
 	char* arg = malloc(strlen(path)*2 + 5);
-	sprintf(arg, "%s:%s%s", path, path,
+	// use the requested path on the host side and the resolved path on the container side
+	// so that /lib /lib64 are mounted from /usr/lib and /usr/lib64 on
+	// systems where they are unified
+	sprintf(arg, "%s:%s%s", path, requested_path,
 			(read_only ? ":ro" : ""));
 
 	append(cmd, "-v");
