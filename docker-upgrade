@@ -94,8 +94,9 @@ def make_fifo(path: str) -> BinaryIO:
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     return os.fdopen(fd, "rb")
 
+# return true if the image was upgraded
 def do_upgrade(client: docker.APIClient, image_id: str, tags: list[str], *, force: bool = False,
-        script: bytes, tmp_dir: str, squid_container: Optional[str]):
+        script: bytes, tmp_dir: str, squid_container: Optional[str]) -> bool:
 
     desc = fmt_image(image_id, tags)
 
@@ -170,6 +171,7 @@ def do_upgrade(client: docker.APIClient, image_id: str, tags: list[str], *, forc
                 client.tag(image=new_id, repository=repo, tag=tag, force=True)
 
             log.info("image upgraded %s -> %s (%s)", desc, fmt_image_id(new_id), status)
+            return True
 
     except APIError as e:
         log.error("failed to upgrade %s (%s)", desc, e)
@@ -181,7 +183,17 @@ def do_upgrade(client: docker.APIClient, image_id: str, tags: list[str], *, forc
                 log.warning("failed to remove temporary container %s (%s)", cid, e)
         if fifo is not None:
             fifo.close()
+    return False
 
+def stop_running_containers(client: docker.DockerClient, images: set[str]):
+    for ctr in client.containers.list():
+        ctr_image = ctr.attrs["Config"]["Image"]
+        if ctr.status == "running" and ctr_image in images:
+            log.info("stopping %s (image %s)", ctr.name, ctr_image)
+            try:
+                ctr.stop()
+            except APIError as e:
+                log.error("failed to stop %s (%s)", ctr.name, e)
 
 def expand_tag(image: str) -> str:
     """parse an image name and append a ':latest' if the image does not have any tag"""
@@ -212,6 +224,9 @@ def main():
     proxy_group.add_argument("--squid", action="store_true",
             help="""launch a squid container in the background to act as a HTTP proxy""")
 
+    parser.add_argument("--stop", action="store_true",
+            help="stop running containers whose image was upgraded")
+
     parser.add_argument("-q", "--quiet",   action="store_true", help="decrease verbosity")
     parser.add_argument("-v", "--verbose", action="count", default=0,
             help="increase verbosity")
@@ -227,17 +242,18 @@ def main():
     
     have_error = False
     client = docker.APIClient()
+    docker_client = docker.DockerClient()
 
     # prepare the list of images to be upgraded
 
     # key:    image id
-    # values: tags
+    # values: repo:tag
     images : dict[str, list[str]] = collections.defaultdict(list)
     for image in args.images:
         expected_repo_tag = expand_tag(image)
         try:
             img = client.inspect_image(image)
-        except docker.errors.APIError as e:
+        except APIError as e:
             if args.ignore_unknown and isinstance(e, NotFound):
                 log.debug("skipping unknown image %r", image)
             else:
@@ -263,6 +279,9 @@ def main():
         return 1
 
     with contextlib.ExitStack() as stack:
+        stop_set = set()
+        if args.stop:
+            stack.callback(stop_running_containers, docker_client, stop_set)
         tmp_dir = stack.enter_context(tempfile.TemporaryDirectory())
         squid_container = stack.enter_context(run_squid_container()) if args.squid else None
 
@@ -270,7 +289,8 @@ def main():
                 # order by first tag (and put all untagged images unsorted at the end)
                 key=lambda x: x[1][0] if x[1] else "~"):
 
-            do_upgrade(client, image_id, tags, force=args.force, script=script, tmp_dir=tmp_dir,
-                    squid_container=squid_container)
+            if do_upgrade(client, image_id, tags, force=args.force, script=script, tmp_dir=tmp_dir,
+                    squid_container=squid_container):
+                stop_set.update(tags)
 
 sys.exit(main())

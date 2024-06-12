@@ -225,9 +225,8 @@ docker-upgrade
 **Upgrade docker images**
 
 <pre>
-usage: docker-upgrade [-h] [-f] [--ignore-unknown]
-                      [--http-proxy URL | --squid] [-q] [-v]
-                      IMAGE [IMAGE ...]
+usage: docker-upgrade [-h] [-f] [--ignore-unknown] [--http-proxy URL | --squid]
+                      [--stop] [-q] [-v] IMAGE [IMAGE ...]
 
 positional arguments:
   IMAGE             image name (with wildcard expansion)
@@ -239,8 +238,9 @@ optional arguments:
   --ignore-unknown  silently ignore unknown images listed in the command line
   --http-proxy URL  value for the `http_proxy` environment variable to be set
                     in the upgrade container
-  --squid           launch a squid container in the background to act as a
-                    HTTP proxy
+  --squid           launch a squid container in the background to act as a HTTP
+                    proxy
+  --stop            stop running containers whose image was upgraded
   -q, --quiet       decrease verbosity
   -v, --verbose     increase verbosity
 </pre>
