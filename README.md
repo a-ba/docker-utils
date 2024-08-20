@@ -236,6 +236,10 @@ optional arguments:
   -f, --force       force committing a new image even if there is no reported
                     upgrades
   --ignore-unknown  silently ignore unknown images listed in the command line
+  --ignore-inspect-errors
+                    do the upgrades even if there are image inspect errors
+                    (by default the script aborts as soon as any image fails
+                    inspection)
   --http-proxy URL  value for the `http_proxy` environment variable to be set
                     in the upgrade container
   --squid           launch a squid container in the background to act as a HTTP

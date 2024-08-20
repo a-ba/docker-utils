@@ -216,6 +216,9 @@ def main():
             help="force committing a new image even if there is no reported upgrades")
     parser.add_argument("--ignore-unknown", action="store_true",
             help = "silently ignore unknown images listed in the command line")
+    parser.add_argument("--ignore-inspect-errors", action="store_true",
+            help = "do the upgrades even if there are image inspect errors (by default the script "
+            "aborts as soon as any image fails to be inspected)")
 
     proxy_group = parser.add_mutually_exclusive_group()
     proxy_group.add_argument("--http-proxy", metavar="URL",
@@ -258,7 +261,8 @@ def main():
                 log.debug("skipping unknown image %r", image)
             else:
                 log.error("failed to inspect image %r (%s)", image, e)
-                have_error = True
+                if not args.ignore_inspect_errors:
+                    have_error = True
             continue
 
         lst = images[img["Id"]]
