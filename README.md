@@ -242,6 +242,8 @@ optional arguments:
                     inspection)
   --http-proxy URL  value for the `http_proxy` environment variable to be set
                     in the upgrade container
+  --https-proxy URL value for the `https_proxy` environment variable to be set
+                    in the upgrade container
   --squid           launch a squid container in the background to act as a HTTP
                     proxy
   --stop            stop running containers whose image was upgraded

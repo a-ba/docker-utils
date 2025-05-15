@@ -226,6 +226,9 @@ def main():
             container""")
     proxy_group.add_argument("--squid", action="store_true",
             help="""launch a squid container in the background to act as a HTTP proxy""")
+    parser.add_argument("--https-proxy", metavar="URL",
+            help="""value for the `https_proxy` environment variable to be set in the upgrade
+            container""")
 
     parser.add_argument("--stop", action="store_true",
             help="stop running containers whose image was upgraded")
@@ -276,6 +279,9 @@ def main():
         if http_proxy is not None:
             log.info("using http_proxy: %s", http_proxy)
             script = f"export http_proxy={shlex.quote(http_proxy)}\n".encode() + script
+        if args.https_proxy is not None:
+            log.info("using https_proxy: %s", args.https_proxy)
+            script = f"export https_proxy={shlex.quote(args.https_proxy)}\n".encode() + script
     except Exception as e:
         log.error("failed to load the upgrade script (%s)", e)
         have_error = True
